@@ -11,6 +11,11 @@ let package = Package(
         .executableTarget(
             name: "MyQuotaBar",
             path: "Sources/MyQuotaBar"
+        ),
+        .testTarget(
+            name: "MyQuotaBarTests",
+            dependencies: ["MyQuotaBar"],
+            path: "Tests/MyQuotaBarTests"
         )
     ]
 )

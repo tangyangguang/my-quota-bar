@@ -133,15 +133,15 @@ struct SpeechProvider: Sendable {
             purchased: purchased,
             used: used,
             unit: unit,
-            purchasedValue: numberFromLoose(purchased),
-            usedValue: numberFromLoose(used),
+            purchasedValue: Self.numberFromLoose(purchased),
+            usedValue: Self.numberFromLoose(used),
             expires: expires,
             type: type
         )
     }
 
     /// 从 "20,000 次" / "8.79 小时" 里抽出数值。
-    private func numberFromLoose(_ s: String) -> Double {
+    static func numberFromLoose(_ s: String) -> Double {
         let cleaned = s.replacingOccurrences(of: ",", with: "")
         var num = ""
         for ch in cleaned {

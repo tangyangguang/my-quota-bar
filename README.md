@@ -60,3 +60,13 @@ open "outputs/My Quota Bar.app"
 ## 加新账号 / 新服务（给开发者）
 
 见 PROJECT_RULES.md。要点：每个服务「照搬原样」，写自己的 Provider（取数）+ 展示卡片（`ServiceContent` 加 case + 对应 `*CardView`），并在 `AppModel` 登记账号/服务。已预留多账号（含同类型多个账号）结构。
+
+## 测试
+
+关键逻辑有单测（`Tests/MyQuotaBarTests/`，不求多、只盖数据正确性命脉）：
+
+```bash
+swift test
+```
+
+覆盖：数值格式化（去尾零/限位）、百分比计算（除零/越界裁剪）、语音数值抽取（千分位逗号）、Agent Plan JSON 解析（字段缺失/窗口排序/异常抛错）、重置倒计时文案（分/时/天边界）。
