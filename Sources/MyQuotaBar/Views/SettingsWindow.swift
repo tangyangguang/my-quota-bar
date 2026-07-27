@@ -114,6 +114,28 @@ struct AccountsSettingsTab: View {
     var body: some View {
         Form {
             Section {
+                if model.arkProfiles.isEmpty {
+                    Text("未检测到 arkcli profile。请先安装 arkcli 并登录。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Picker("Agent Plan 账号", selection: Binding(
+                        get: { model.arkPlanProfile },
+                        set: { model.selectAgentPlanProfile($0) }
+                    )) {
+                        ForEach(model.arkProfiles) { p in
+                            Text("\(p.displayName)（\(p.name)）").tag(p.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+            } header: {
+                Text("火山引擎 · Agent Plan")
+            } footer: {
+                Text("选择你自己的 arkcli profile（类型为 agent-plan 的那个）。凭证走本机 arkcli 登录态，无需在此填写。")
+                    .font(.caption)
+            }
+
+            Section {
                 RevealableField(title: "Access Key ID", text: $ak)
                 RevealableField(title: "Secret Access Key", text: $sk)
                 TextField("应用 AppID", text: $appID)

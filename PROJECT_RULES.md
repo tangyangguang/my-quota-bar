@@ -62,10 +62,11 @@
 
 ## 账号与服务现状
 
-### 账号 A：`agent-plan_cn-beijing_personal`（Agent Plan Medium 个人版）
+### 账号 A：Agent Plan（arkcli profile，类型 agent-plan）
 - **服务：Agent Plan** —— 三个窗口（5h / weekly / monthly）。
+- profile 名 **不写死**：App 启动时调 `arkcli profile list` 自动发现，默认选第一个 `type=agent-plan` 的；用户可在设置「密钥」Tab 下拉改选（持久化到 UserDefaults）。这样别人装了用自己的 arkcli 登录态即可。
+- 开发机器上当前的示例 profile：`agent-plan_cn-beijing_personal`（仅供参考，代码里不硬编码）。
 - 数据来源：✅ 已确认可行，见下方登记。
-- 状态：**第一步实现，先做这个，让我先用上。**
 
 ### 账号 B：`platform_cn-beijing_accountwide`（控制台按量 / 语音服务身份）
 - **服务：语音识别 ASR**（约 20h 免费额度） + **语音合成 TTS**（次数/字符/时长待定）。

@@ -42,8 +42,11 @@ final class AppModel {
 
     // MARK: 账号 / 服务配置（新增账号/服务在这里登记）
 
-    private let arkPlanProfile = "agent-plan_cn-beijing_personal"
+    /// Agent Plan 对应的 arkcli profile 名。可在设置里选；未选时启动自动发现。
+    private(set) var arkPlanProfile: String = AppSettings.agentPlanProfile ?? ""
     private let arkPlanFallbackName = "Agent Plan 账号"
+    /// 本机可用的 arkcli profile 列表（设置里下拉选择）。
+    private(set) var arkProfiles: [ArkProfile] = []
 
     private let speechAccountID = "speech-account-b"
     private var speechAccountName = "火山引擎 · 语音账号"
@@ -78,10 +81,29 @@ final class AppModel {
 
     init() {
         // 默认菜单栏固定显示 5 小时窗口（用户仍可在设置里改）。
-        if let saved = AppSettings.selectedMetricID {
-            selectedMetricID = saved
-        } else {
-            selectedMetricID = "\(arkPlanProfile)/agent-plan/5h"
+        selectedMetricID = AppSettings.selectedMetricID
+    }
+
+    /// 选定 Agent Plan profile（设置里下拉），并立即刷新。
+    func selectAgentPlanProfile(_ name: String) {
+        guard name != arkPlanProfile else { return }
+        // 清掉旧 profile 对应账号（避免残留）。
+        if !arkPlanProfile.isEmpty {
+            accounts.removeAll { $0.id == arkPlanProfile }
+        }
+        arkPlanProfile = name
+        AppSettings.agentPlanProfile = name
+        refreshSource(.agentPlan)
+    }
+
+    /// 启动时发现本机 profile；若用户未选，自动选第一个 agent-plan 类型的。
+    private func discoverProfilesIfNeeded() async {
+        arkProfiles = await ArkProfileLister.list()
+        if arkPlanProfile.isEmpty {
+            if let auto = arkProfiles.first(where: { $0.type == "agent-plan" }) ?? arkProfiles.first {
+                arkPlanProfile = auto.name
+                AppSettings.agentPlanProfile = auto.name
+            }
         }
     }
 
@@ -144,7 +166,10 @@ final class AppModel {
 
     func startAutomaticRefresh() {
         guard timers.isEmpty else { return }
-        refresh()   // 启动先全量拉一次
+        Task {
+            await discoverProfilesIfNeeded()
+            refresh()   // 发现 profile 后再全量拉一次
+        }
         for source in RefreshSource.allCases {
             scheduleTimer(for: source)
         }
@@ -190,6 +215,7 @@ final class AppModel {
     }
 
     private func refreshAgentPlan() async {
+        guard !arkPlanProfile.isEmpty else { return }   // 未选 profile 则不拉
         let provider = ArkPlanProvider(profile: arkPlanProfile)
         let now = Date()
         do {
@@ -254,15 +280,21 @@ final class AppModel {
             }
             let packs = try await provider.fetch()
             // 层级与 Agent Plan 对齐：每个 pack 当作一个独立服务挂在语音账号下。
-            for p in packs {
+            // 成功时重建该账号的服务列表（清掉旧的 error 占位服务）。
+            let services = packs.map { p -> Service in
                 let pack = SpeechPack(title: p.title, purchased: p.purchased, used: p.used,
                                       unit: p.unit, purchasedValue: p.purchasedValue,
                                       usedValue: p.usedValue, expires: p.expires, type: p.type)
-                let service = Service(
+                return Service(
                     id: "speech-\(p.title)", title: p.title,
                     content: .speech(pack), status: .ok, errorMessage: nil, updatedAt: now
                 )
-                upsertAccount(id: speechAccountID, name: speechAccountName, service: service)
+            }
+            if services.isEmpty {
+                // 配了密钥但没查到资源包：不报错，只移除该账号。
+                accounts.removeAll { $0.id == speechAccountID }
+            } else {
+                setAccountServices(id: speechAccountID, name: speechAccountName, services: services)
             }
         } catch {
             markSpeechError(message: error.localizedDescription)
@@ -290,6 +322,16 @@ final class AppModel {
     }
 
     // MARK: 账号/服务写入
+
+    /// 整个替换一个账号的服务列表（用于刷新成功时重建，清掉旧残留）。
+    private func setAccountServices(id: String, name: String, services: [Service]) {
+        if let ai = accounts.firstIndex(where: { $0.id == id }) {
+            accounts[ai].services = services
+            accounts[ai].name = name
+        } else {
+            accounts.append(Account(id: id, name: name, services: services))
+        }
+    }
 
     private func upsertAccount(id: String, name: String, service: Service) {
         if let ai = accounts.firstIndex(where: { $0.id == id }) {

@@ -32,4 +32,14 @@ enum AppSettings {
         set { UserDefaults.standard.set(Array(newValue), forKey: hiddenKey) }
     }
     private static let hiddenKey = "hiddenServiceIDs"
+
+    /// 用户选定的 Agent Plan profile 名；nil = 未选（自动发现）。
+    static var agentPlanProfile: String? {
+        get { UserDefaults.standard.string(forKey: agentProfileKey) }
+        set {
+            if let v = newValue { UserDefaults.standard.set(v, forKey: agentProfileKey) }
+            else { UserDefaults.standard.removeObject(forKey: agentProfileKey) }
+        }
+    }
+    private static let agentProfileKey = "agentPlanProfile"
 }

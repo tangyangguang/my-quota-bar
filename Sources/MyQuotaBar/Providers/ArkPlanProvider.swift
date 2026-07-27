@@ -110,3 +110,41 @@ struct ArkPlanProvider: Sendable {
         return trimmed.count > 200 ? String(trimmed.prefix(200)) + "…" : trimmed
     }
 }
+
+// MARK: - Profile 发现
+
+/// arkcli 本地 profile（用于设置里选 Agent Plan 账号）。
+struct ArkProfile: Identifiable, Equatable, Sendable {
+    let name: String          // profile 名，如 agent-plan_cn-beijing_personal
+    let displayName: String   // 如 Agent Plan Medium
+    let type: String          // 如 agent-plan / platform
+    var id: String { name }
+}
+
+enum ArkProfileLister {
+    /// 列出本机所有 arkcli profile。失败返回空数组。
+    static func list() async -> [ArkProfile] {
+        guard let arkcli = ProcessRunner.locate(["arkcli"]) else { return [] }
+        guard let result = try? await ProcessRunner.run(
+            executable: arkcli,
+            arguments: ["profile", "list", "--format", "json"],
+            extraEnvironment: [
+                "ARKCLI_CALLER_TYPE": "ai_agent",
+                "ARKCLI_CALLER_NAME": "my-quota-bar",
+                "ARKCLI_SKILL_NAME": "arkcli-profile"
+            ],
+            timeout: 15
+        ), result.exitCode == 0,
+           let data = result.stdout.data(using: .utf8),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = root["profiles"] as? [[String: Any]] else { return [] }
+        return arr.compactMap { p in
+            guard let name = p["name"] as? String else { return nil }
+            return ArkProfile(
+                name: name,
+                displayName: (p["display_name"] as? String) ?? name,
+                type: (p["type"] as? String) ?? ""
+            )
+        }
+    }
+}
