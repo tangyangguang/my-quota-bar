@@ -1,0 +1,18 @@
+# Swift Package Manager / 构建产物
+.build/
+.swiftpm/
+Package.resolved
+
+# 应用打包产物
+outputs/
+
+# macOS
+.DS_Store
+
+# 抓包/调试临时文件（不应入库）
+/tmp/sniff/
+capture.json
+*.log
+
+# 控制台截图（含账号/AppID/密钥等敏感信息，不入公开仓库）
+pics/
