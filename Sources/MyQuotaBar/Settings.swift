@@ -1,6 +1,6 @@
 import Foundation
 
-/// 用户设置持久化（UserDefaults）。目前只有：菜单栏常驻显示哪个指标。
+/// 用户设置持久化（UserDefaults）：菜单栏显示指标、各源刷新间隔、服务隐藏、Agent Plan profile。
 @MainActor
 enum AppSettings {
     private static let menuBarMetricKey = "menuBarMetricID"

@@ -186,7 +186,8 @@ struct AccountsSettingsTab: View {
     private func clear() {
         SpeechCredentials.accessKeyID = ""
         SpeechCredentials.secretAccessKey = ""
-        ak = ""; sk = ""
+        SpeechCredentials.appID = ""
+        ak = ""; sk = ""; appID = ""
         savedTip = false
         model.clearSpeechAccount()
     }

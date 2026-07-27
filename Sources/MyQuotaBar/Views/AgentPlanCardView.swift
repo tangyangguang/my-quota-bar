@@ -34,9 +34,10 @@ struct AgentPlanCardView: View {
                     .monospacedDigit()
                 Spacer()
                 if let reset = p.resetAt {
-                    Text("重置 \(DateFmt.short.string(from: reset))")
+                    Text(RelativeReset.text(to: reset))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .help("重置于 \(DateFmt.short.string(from: reset))")
                 }
             }
         }
@@ -68,4 +69,24 @@ enum DateFmt {
         f.dateFormat = "M/d HH:mm"
         return f
     }()
+}
+
+/// 相对重置倒计时文案（他官网那种“X 后重置”）。
+enum RelativeReset {
+    static func text(to date: Date, now: Date = Date()) -> String {
+        let secs = date.timeIntervalSince(now)
+        guard secs > 0 else { return "即将重置" }
+        let mins = Int(secs / 60)
+        if mins < 60 {
+            return "\(max(1, mins)) 分钟后重置"
+        }
+        let hours = mins / 60
+        if hours < 24 {
+            let remMin = mins % 60
+            return remMin == 0 ? "\(hours) 小时后重置" : "\(hours) 小时 \(remMin) 分后重置"
+        }
+        let days = hours / 24
+        let remHour = hours % 24
+        return remHour == 0 ? "\(days) 天后重置" : "\(days) 天 \(remHour) 小时后重置"
+    }
 }
