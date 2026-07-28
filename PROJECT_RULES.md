@@ -1,186 +1,194 @@
 # My Quota Bar — 项目规则与背景
 
-> 本文件是本项目唯一的权威背景文档。新会话读此文件即可接上下文。
-> （旧的 PROJECT_BRIEF.md 已废弃删除，理解有偏差，一律以本文件为准。）
+> 本文件是本项目唯一的权威背景文档。**新会话读此文件即可接上下文。**
+> 每次架构性改动后必须同步更新本文件。
 
 ## 一句话目标
 
-一个 **macOS 原生菜单栏应用**，常驻菜单栏，一键点开就能看到**我名下多个火山引擎账号**里各项服务的剩余额度/用量。自己用，只在自己的 Mac 上跑，纯本地，不上传任何数据。
+一个 **macOS 原生菜单栏应用**，常驻菜单栏，一键点开就能看到**我名下多个账号**里各项服务的剩余额度/用量。自己用 + 可发给朋友，纯本地，不上传任何数据，**零命令行依赖**。
 
 ## 为什么要做 / 核心定位
 
-- 我有**多个火山引擎账号**（目前 2 个），每个账号各有免费额度，所以才分账号。
-- 不想每个账号单独开一个 App，**一个 App 管所有账号**。
-- 以后有新账号 / 新服务，直接往这个 App 里加，不再新建应用。
-- 参考同级目录的 `~/workspace/codex-quota-menubar/`（Codex 额度菜单栏）——**样式可以接受、架构可参考，但那是独立项目，不要动它**。本项目是全新的、更通用的额度总控台。
+- 我有**多个账号**（目前是多个火山引擎账号），每个账号各有免费额度，所以才分账号。
+- 不想每个账号单独开一个 App，**一个 App 管所有账号、所有平台**。
+- 以后有新账号 / 新服务 / 新平台，直接往这个 App 里加，不再新建应用。
+- 参考同级目录的 `~/workspace/codex-quota-menubar/`（样式可参考）——**但那是独立项目，绝不要改它**。
+
+## 当前状态（2026-07，重构后）
+
+**已完成并稳定运行**。核心能力：
+- ✅ **多平台架构**：`Platform` 枚举（目前仅 `volcengine`），字段已埋入数据结构，加新平台不动 schema。
+- ✅ **任意多账号**：每个账号一对 AK/SK，配置任意数量，可拖动排序。
+- ✅ **火山 Agent Plan**：AK/SK 直调 OpenAPI `GetAFPUsage`（**已彻底移除 arkcli 依赖**）。
+- ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度。
+- ✅ **测试驱动配置**：AK/SK、Agent Plan、每个语音应用都有独立「测试」按钮，绿/红反馈。
+- ✅ **经典主从布局设置窗口** + **零命令行分发**。
 
 ## 关键设计原则（务必遵守）
 
-### 1. 层级：账号 → 服务，一张面板平铺
+### 1. 层级：平台 → 账号 → 服务 → 额度
 ```
-账号（一个火山账号 = 一份身份 / 一份免费额度）
-  └─ 服务（该账号下的某项：Agent Plan / ASR / TTS / ...）
-       └─ 该服务自己的额度信息（原样展示）
+平台（火山引擎 / 将来：硅基流动、阿里云…）
+  └─ 账号（一份身份 = 一对 AK/SK = 一份免费额度）
+       └─ 服务（Agent Plan / 语音应用1 / 语音应用2 / ...）
+            └─ 该服务自己的额度信息（原样展示）
 ```
-- 顶层**按账号分组**（不是按服务类型分）。
-- 层级**不要太深**，一个面板里直接平铺显示完，不要多级折叠、不要抽屉。
-- 力求**简洁清晰**，方便个人快速一眼看懂。
+- 面板顶层**按账号分组**，账号内先 Agent Plan 后语音。
+- 层级不要太深，一个面板平铺显示，不多级折叠。
+- 账号名格式：面板里显示用户设的「账户名称」；平台名（如"火山引擎"）作为前缀语境。
 
 ### 2. 每个服务「照搬原样」，不统一格式、不做转换（最重要）
 - **不**强行套用统一的 `used/total/百分比` 模型。
-- 每个服务在火山控制台网页上**原本长什么样，就搬过来长什么样**：
-  - **Agent Plan**：有多个窗口 —— 5 小时 / 每周(weekly) / 每月(monthly)，每个窗口有已用、总额度、百分比、下次重置时间。
-  - **语音识别 ASR**：形如「已用多少小时 / 共多少小时（如 20h 免费额度）」。
-  - **语音合成 TTS**：形如「总共多少次 / 已调用多少次」（按官方实际给的字段，可能是次数、字符数或时长，以官方为准）。
-- 官方接口给什么字段就显示什么，**我们只做搬运，不做合并、不做统一抽象**。
-- 因此每个服务有它**专属的取数逻辑 + 专属的展示卡片**，各服务互不影响。
+- 官方接口给什么字段就显示什么，**只做搬运，不做合并、不做统一抽象**。
+  - **Agent Plan**：三个窗口 5 小时 / 每周 / 每月，各有已用、总额度、百分比、下次重置时间，单位 AFP。
+  - **语音应用**：资源包 `purchased_amount` / `current_usage` / `expires`，单位照官方（"20.00 小时" / "20,000 次"）。
+- 每个服务有**专属取数逻辑 + 专属展示卡片**，各服务互不影响。
 
-### 3. 菜单栏常驻显示：用户手动勾选一个作为默认
-- 菜单栏图标旁边常驻显示**一个**指标（一个百分比，或一个数字——取决于该指标本身形态）。
-- 到底显示哪一个，由用户**在设置里勾选**决定；**不做自动挑选、不做轮换**。选哪个就固定显示哪个，逻辑最简单。默认固定显示 Agent Plan 的「5 小时」窗口。
-- 有百分比的指标显示百分比；纯数字的指标显示数字。
-- **菜单栏图标要省横向空间**：图标用 `imageScale(.small)`，且**图标跟随服务类型变化**（Agent Plan 用 `a.circle`，不同服务用不同的窄图标区分），间距压到最小。
+### 3. 数值一律照官方原样，不压缩
+- 保留官方返回的小数（去掉无意义末尾零），如 `1793.747 / 10000 AFP`。
+- **禁止** k / w / 1.8K 这类友好压缩。和控制台网页对齐。
 
-### 3.5 数值一律「照官方原样」显示，不压缩
-- 面板里的已用/总量等数字**原样展示**，保留官方返回的小数（去掉无意义的末尾零即可），例如 `1793.747 / 10000 AFP`、`25873.646 / 100000 AFP`。
-- **禁止**做 k / w / 1.8K 这类友好压缩。官方返回什么就显示什么，和控制台网页对齐。
-- 账号分组标题用**真实账号信息**（arkcli `viewer.user_name` + `account_id` 末 4 位），不要写死「账号A」这类占位名。
+### 4. 菜单栏常驻显示：用户手动勾选一个
+- 菜单栏图标旁常驻显示**一个**指标，由用户在「显示」设置里勾选；**不自动挑选、不轮换**。
+- 图标窄（`imageScale(.small)`），跟随服务类型变化。
 
-### 4. 数据来源要在本文件登记，官方变了就改代码
-- 每接入一个服务，就在下方「服务数据来源登记」里记录：数据从哪来、字段结构、对应控制台哪个页面。
-- **如果官方接口/网页字段变了，照着这份登记去更新对应服务模块即可**，不影响其他服务。
+### 5. 防丢配置（关键约束）
+- 所有持久化结构用**防御式 Codable**：缺字段给默认值、未知枚举回落，**旧配置永不因 schema 变动丢失**。
+- `AccountConfig` / `SpeechApp` 都自定义了 `init(from:)`，加新字段时务必保持这个习惯。
+- 有单测守这条底线（见"测试"节）。
 
 ## 技术选型（已定）
 
 | 项 | 选择 |
 |----|------|
-| 语言 / UI | Swift + SwiftUI `MenuBarExtra`（`.menuBarExtraStyle(.window)`），参考 codex-quota-menubar |
-| 构建 | Swift Package Manager + `build-app.sh`，编译 universal（arm64 + x86_64），ad-hoc 本地签名（`codesign --sign -`），无需 Apple Developer 账号 |
-| 分发 | 直接把 `outputs/My Quota Bar.app` 发给别人。因 ad-hoc 签名未公证，对方第一次打开会被 Gatekeeper 拦；需 `xattr -cr "路径/My Quota Bar.app"` 清除 quarantine 后双击即可（已实测有效）。README 有完整说明。 |
-| 定时刷新 | Timer 定时刷新；刷新中不重复发起；出错保留上一次有效值 |
-| 刷新间隔 | 5 分钟（300s）。因 arkcli 数据本身有 5–30 分钟延迟，无需高频 |
+| 语言 / UI | Swift 6 + SwiftUI `MenuBarExtra`（`.menuBarExtraStyle(.window)`） |
+| 构建 | SPM + `build-app.sh`，universal（arm64 + x86_64），ad-hoc 本地签名（`codesign --sign -`），无需 Apple Developer 账号 |
+| 分发 | 直接发 `outputs/My Quota Bar.app`。ad-hoc 签名未公证，对方首次打开需 `xattr -cr "路径"` 清除 quarantine（README 有说明）。**零 CLI 依赖，朋友只需填 AK/SK。** |
+| 认证 | 账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift` |
+| 凭证存储 | AK/SK 加密存 macOS 钥匙串（按账号 UUID 隔离）；非敏感配置存 UserDefaults(JSON) |
+| 定时刷新 | 每源独立 Timer；刷新中不重复发起；出错保留上次有效值；休眠/断网感知；`.default` RunLoop + tolerance 降耗 |
+| 刷新间隔 | 默认 3 分钟（180s），可在「显示」设置按源独立调。上游有 5–30 分钟延迟 |
 | 运行形态 | `LSUIElement=true`，无 Dock 图标，仅菜单栏 |
 
-## 账号与服务现状
+## 数据来源登记（官方接口变了照此更新）
 
-### 账号 A：Agent Plan（arkcli profile，类型 agent-plan）
-- **服务：Agent Plan** —— 三个窗口（5h / weekly / monthly）。
-- profile 名 **不写死**：App 启动时调 `arkcli profile list` 自动发现，默认选第一个 `type=agent-plan` 的；用户可在设置「密钥」Tab 下拉改选（持久化到 UserDefaults）。这样别人装了用自己的 arkcli 登录态即可。
-- 开发机器上当前的示例 profile：`agent-plan_cn-beijing_personal`（仅供参考，代码里不硬编码）。
-- 数据来源：✅ 已确认可行，见下方登记。
+### 火山 Agent Plan —— AK/SK 直调 OpenAPI（已验证 HTTP 200）
+- **接口**：`GET https://ark.cn-beijing.volcengineapi.com/?Action=GetAFPUsage&Version=2024-01-01`
+- **Service** `ark`，**Region** `cn-beijing`
+- **认证**：账号 AK/SK（`VolcSigner`）
+- **返回**：`Result.PlanType` + `AFPFiveHour` / `AFPWeekly` / `AFPMonthly`，各含 `Quota` / `Used` / `ResetTime`
+- **注**：响应无账号 ID，身份另走 STS `GetCallerIdentity` 单独查。
+- 实现：`AgentPlanProvider.swift`
 
-### 账号 B：`platform_cn-beijing_accountwide`（控制台按量 / 语音服务身份）
-- **服务：语音识别 ASR**（约 20h 免费额度） + **语音合成 TTS**（次数/字符/时长待定）。
-- 数据来源：⚠️ 待调研。arkcli **明确不支持**语音模型用量查询，需走火山语音 OpenAPI（可能需账号 B 的 AK/SK）。
-- 状态：**第二步实现。**待确认：控制台哪个页面看到 ASR 免费额度、TTS 单位是什么、账号 B 是否已有 AK/SK。
+### 火山语音 ASR / TTS —— AK/SK 公开 OpenAPI（已验证 HTTP 200）
+- **接口**：`POST https://open.volcengineapi.com/?Action=ResourcePacksStatus&Version=2023-11-07`
+- **Service** `speech_saas_prod`，**Region** `cn-north-1`
+- **认证**：账号 AK/SK
+- **请求体**：`{"AppID":<AppID>,"ResourceID":[...],"Type":["quota","prepaid"],"PageNumber":1,"PageSize":10,"States":["active"]}`
+- **返回**（照搬原样）：`Result.Packs[].purchased_amount` / `current_usage` / `expires` / `type` / `instance_number`
+- **重要限制**（已实测确认）：AK/SK **拿不到语音应用的官方名称**（所有"列应用/查应用"接口都 404，`alias`/`group_name` 返回空）。所以**语音应用名称只能用户手填备注**，拿不到就显示 AppID。
+- **对应控制台**：豆包语音 → 各服务 → "服务包及使用详情"
+- 实现：`SpeechProvider.swift`
 
-## 服务数据来源登记
+### 账号身份 —— STS GetCallerIdentity
+- **接口**：`GET https://open.volcengineapi.com/?Action=GetCallerIdentity&Version=2018-01-01`
+- **Service** `sts`，**Region** `cn-north-1`
+- **返回**：`Result.AccountId`（数字）、`Trn`（含 IAM 用户名，形如 `trn:iam::<id>:user/<名>`）
+- **用途**：测试连接时拿账号 ID + 真实名称（IAM 用户名；若是默认 `user` 占位则回落账号 ID）自动填账户名称。
+- 实现：`VolcSigner.fetchIdentity(...)` / `fetchAccountID(...)`
 
-### [账号A] Agent Plan —— arkcli
-- **命令**：
-  ```bash
-  ARKCLI_CALLER_TYPE=ai_agent ARKCLI_CALLER_NAME=<agent> ARKCLI_SKILL_NAME=arkcli-usage \
-  arkcli usage plan --profile agent-plan_cn-beijing_personal --format json
-  ```
-- **认证**：arkcli SSO 登录态；token 过期需在终端重新 `arkcli` 登录。
-- **数据延迟**：5–30 分钟（上游 BFF 聚合），额度监控够用。
-- **真实返回结构**（2026-07 实测）：
-  ```json
-  {
-    "viewer": { "user_name": "...", "account_id": "...", "profile": "...", "region": "..." },
-    "items": [
-      {
-        "product": "agent-plan", "edition": "personal", "tier": "medium", "subscribed": true,
-        "periods": [
-          { "label": "5h",      "used": 1706.99, "total": 10000,  "percent": 17.07, "reset_at": "2026-07-28T02:47:25+08:00" },
-          { "label": "weekly",  "used": 9602.37, "total": 35000,  "percent": 27.44, "reset_at": "2026-08-03T00:00:00+08:00" },
-          { "label": "monthly", "used": 25841.7, "total": 100000, "percent": 25.84, "reset_at": "2026-08-15T23:59:59+08:00" }
-        ]
-      }
-    ]
-  }
-  ```
-- **展示**：三行窗口（5小时/每周/每月），每行 = 进度条 + 百分比 + 已用/总量 + 重置时间。额度单位 AFP。
+## 数据模型（核心）
 
-### [账号B] 语音 ASR / TTS —— ✅ 已确认可行（AK/SK 公开 OpenAPI）
-- **接口**：火山引擎公开 OpenAPI 网关 `open.volcengineapi.com`
-  - Method: `POST`，Query: `Action=ResourcePacksStatus&Version=2023-11-07`
-  - Service: `speech_saas_prod`，Region: `cn-north-1`
-- **认证**：账号级 AK/SK（火山签名 HMAC-SHA256，AWS V4 风格）。环境变量：
-  - `VOLC_ACCESS_KEY_ID`（AK，形如 AKLT...）
-  - `VOLC_SECRET_ACCESS_KEY`（SK）
-- **AppID**：`<你的AppID>`（应用 app1）。后续多 app 可扩展。
-- **请求体**（已实测 HTTP 200）：
-  ```json
-  // ASR（语音识别，小时）
-  {"AppID":<你的AppID>,"ResourceID":["volc.seedasr.sauc.duration"],"Type":["quota","prepaid"],"PageNumber":1,"PageSize":10,"States":["active"]}
-  // TTS（语音合成，次数）
-  {"AppID":<你的AppID>,"ResourceID":["volc.tts.default"],"Type":["quota","prepaid"],"PageNumber":1,"PageSize":10,"States":["active"]}
-  ```
-- **返回字段**（照搬原样）：`Result.Packs[].purchased_amount`（如 "20.00 小时" / "20,000 次"）、`current_usage`（如 "8.79 小时" / "34 次"）、`expires`、`type`（试用包）、`instance_number`。
-- **对应控制台**：豆包语音 → 各服务 → “服务包及使用详情”。
-- **注**：控制台网页走的是 `console.volcengine.com/api/top/...` 内部接口（cookie 认证），但同一 Action 在公开网关上用 AK/SK 也能调（已验证），故**首选 AK/SK**，不用 cookie（cookie 会过期）。
-- **签名算法参考**：`/tmp/sniff/sign_test.py`（Python 验证版）；Swift 实现在 `SpeechProvider.swift`。
+- **`Platform`**（枚举，Codable）：`volcengine`。`displayName` 显示名；`from(_:)` 容错未知平台回落火山。加平台在此加 case。
+- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `speechApps[]`。**自定义 Codable 防丢配置**。AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。
+- **`SpeechApp`**：`id(UUID)` / `appID` / `label`。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。**自定义 Codable**。
+- **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串。
+- **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.speech`)（QuotaModels.swift）。
 
 ## 项目结构
 
 ```
 my-quota-bar/
 ├── PROJECT_RULES.md               # 本文件（唯一权威背景）
-├── README.md                      # 使用/构建说明
+├── README.md                      # 使用/构建/分发说明
 ├── Package.swift
-├── build-app.sh                   # 构建 + ad-hoc 签名
-├── Resources/Info.plist
+├── build-app.sh                   # 构建 + ad-hoc 签名（universal）
+├── Resources/Info.plist           # LSUIElement=true, bundle id local.my.quota-bar
 ├── Sources/MyQuotaBar/
-│   ├── MyQuotaBarApp.swift         # @main, MenuBarExtra 入口
-│   ├── AppModel.swift              # 状态 + 定时刷新 + 菜单栏显示项选择
-│   ├── Settings.swift              # 用户设置（菜单栏显示哪个指标）持久化
+│   ├── MyQuotaBarApp.swift         # @main, MenuBarExtra + 设置 Window
+│   ├── AppModel.swift              # 状态 + 账号CRUD + 定时刷新 + 菜单栏显示 + 测试方法
+│   ├── Settings.swift              # 非账号设置持久化（菜单栏指标 / 刷新间隔）
+│   ├── Keychain.swift              # 钥匙串封装 + AccountConfig + SpeechApp + AccountStore
 │   ├── Models/
-│   │   └── QuotaModels.swift       # Account / Service / 各服务原样数据结构
+│   │   └── QuotaModels.swift       # Platform / Account / Service / 各服务原样数据结构
 │   ├── Providers/
-│   │   ├── ProcessRunner.swift     # 子进程执行工具
-│   │   └── ArkPlanProvider.swift   # 账号A: arkcli 取 Agent Plan
-│   │   └── (后续) SpeechProvider.swift
+│   │   ├── VolcSigner.swift        # 共享 HMAC-SHA256 签名 + STS 身份查询
+│   │   ├── AgentPlanProvider.swift # Agent Plan 取数 + test()
+│   │   ├── SpeechProvider.swift    # 语音资源包取数 + test()
+│   │   └── ProcessRunner.swift     # 子进程工具（当前无 CLI 依赖，保留）
 │   └── Views/
 │       ├── PopoverView.swift       # 面板主视图（按账号分组平铺）
-│       ├── AccountSectionView.swift# 账号分组
-│       └── AgentPlanCardView.swift # Agent Plan 专属展示卡片
-└── outputs/                        # 构建产物 .app
+│       ├── AccountSectionView.swift# 账号分组 + ServiceCardView 路由
+│       ├── AgentPlanCardView.swift # Agent Plan 展示卡片
+│       ├── SpeechCardView.swift    # 语音展示卡片
+│       └── SettingsWindow.swift    # 设置窗口（账号主从布局 + 显示 Tab）
+├── Tests/MyQuotaBarTests/
+│   └── MyQuotaBarTests.swift       # 单测（17 个）
+├── pics/                           # 截图（gitignore，含敏感信息）
+└── outputs/                        # 构建产物 .app（gitignore）
 ```
+
+## 设置窗口 UI（主从布局，经典 macOS 范式）
+
+- **两个 Tab**：「账号」+「显示」。
+- **账号 Tab = 左右主从**：
+  - 左边栏：账号列表（选中高亮 + **拖动排序**，影响面板顺序），左下 `+`(添加) / `−`(删除选中，二次确认)。
+  - 右侧详情：上「账号信息」(平台只读 / 名称 / 账号ID / AK / SK / 测试连接) + 下「服务」(Agent Plan 卡片 + 语音应用卡片们)。
+  - 底部「保存修改」：有改动才可点，点后闪"✓ 已保存"停留当前账号（不跳走）。
+- **添加账号**：独立小弹窗，平台 + AK/SK + 测试(可选，不挡保存) + 名称(测通自动填)。
+- **服务卡片**：Agent Plan 和每个语音应用都是统一 `ServiceCardStyle` 圆角卡片，视觉同级。语音应用卡片：标题(备注/AppID) + AppID(带标题) + 备注(带标题) + 测试按钮 + 删除。
+- **显示 Tab**：菜单栏显示哪个指标（Picker）；各源刷新间隔（**注意：间隔存 AppModel observable 属性，不是直读 UserDefaults，否则 Picker 会回弹**）。
 
 ## 开发约定（务必遵守）
 
-- **每次改完代码，一律重新构建 + 杀掉旧进程 + 重新 open 启动**，让用户点开看到的一定是最新效果。用户无法看到未重启的改动。
+- **每次改完代码，一律重建 + 杀旧进程 + 重新 open**，用户点开一定看到最新：
   ```bash
-  pkill -9 -f MyQuotaBar; sleep 2; ./build-app.sh; open "outputs/My Quota Bar.app"
+  cd ~/workspace/my-quota-bar && pkill -9 -f MyQuotaBar; sleep 2 && ./build-app.sh && open "outputs/My Quota Bar.app"
   ```
-- SwiftUI 在 `MenuBarExtra(.window)` 里**不要用会塌缩成 0 高度的 `ScrollView`** 包主内容，直接用 `VStack` 自然撑高（否则面板看起来是空的）。
-- 子进程调用 arkcli 时必须**补全 PATH**（`/opt/homebrew/bin` 等），否则 GUI app 环境找不到 node，报 `env: node: No such file or directory`。
-- **信息层级：平台 → 账号 → 服务 → 额度**。平台名（如“火山引擎”）永远在最前；账号名格式统一为 `平台 · 账号名 (…尾号)`；服务作为卡片挂在账号下（Agent Plan / 语音识别 ASR / 语音合成 TTS 各算一个服务）。不要把服务名当账号名。
-- **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）到代码里。仓库是**公开**的：
-  - 语音 AppID 由用户在设置里填（默认空）；AK/SK 存钥匙串。
-  - `pics/`（控制台截图，含账号/密钥）已在 `.gitignore`，不入库。
-- **每个数据源独立刷新间隔**（`AppModel.RefreshSource`），各自一个定时器，互不影响。
-- **关键纯逻辑必须有单测**（不求多，只盖易错/重要点）：数值格式化、百分比计算（除零保护）、譍量抽数、Agent Plan JSON 解析、倒计时文案。改动相关逻辑后跑 `swift test` 确保绿。
+- SwiftUI 在 `MenuBarExtra(.window)` 里**不要用会塌成 0 高度的 `ScrollView`** 包主内容（面板会显空）；主面板用自然撑高的 `VStack`。
+- **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）。仓库**公开**：AppID 用户填、AK/SK 存钥匙串、`pics/` 已 gitignore。
+- **每源独立刷新间隔**（`AppModel.RefreshSource`），各自定时器互不影响。
+- **关键纯逻辑必须有单测**（数值格式化、百分比除零保护、AFP 解析、显示名、倒计时文案、**schema 演进兼容**）。改相关逻辑后 `swift test` 确保绿。
+- **凭证持久化**：AK/SK 一次配好永久存钥匙串，编辑账号自动回填，不需重复输入。改 `AccountConfig` 字段结构时务必保持防御式 Codable，否则旧配置会丢。
 
 ## Git 工作流（务必遵守）
 
-- 远程仓库：`https://github.com/tangyangguang/my-quota-bar.git`
-- **每次改完、验证无问题后，都要 commit 并 push 到远程**。commit message 用中文简述本次改动。
+- 远程：`https://github.com/tangyangguang/my-quota-bar.git`
+- **每次改完、验证 OK 后 commit + push**，message 用中文。
   ```bash
-  git add -A && git commit -m "…" && git push
+  git add -A && git commit -m "…"
+  for i in 1 2 3 4 5; do git push 2>&1 | tail -2 && git status -sb|head -1|grep -q ahead && sleep 4 || break; done
   ```
 - 构建产物（`.build/`、`outputs/`）、截图（`pics/`）不入库。
+- **稳定回滚点**：tag `stable-arkcli-v1`（commit `b437a96`）是旧的 arkcli 版本，保留作回滚。
 
-## 实现节奏
+## 加新平台 / 新服务（未来扩展指南）
 
-1. **[✅ 已完成] 第一步：账号 A · Agent Plan** —— 完整可用的菜单栏 App，能看三窗口，真实账号名、原样数值、窄图标、5h 默认显示、自动刷新、失败保留旧值。
-2. **[✅ 已完成] 第二步：账号 B · 语音 ASR/TTS** —— AK/SK 签名调 `ResourcePacksStatus`，钥匙串存储，独立设置窗口（显示/服务开关/密钥三 Tab），服务可显示/隐藏，每源独立刷新间隔。
-3. 以后随时按「平台 · 账号 → 服务」模式加新账号/新服务，每个服务写自己的 Provider + 展示卡片。已预留多账号（含同类型多个语音账号）结构。
+**加新平台**（如硅基流动）：
+1. `Platform` 枚举加 case + `displayName`。
+2. 写该平台的 Provider（它的余额接口 + 它的认证方式）。
+3. 添加账号弹窗按选中平台展示对应凭证输入（不同平台凭证形态可能不同）。
+4. 火山账号完全不受影响，旧配置不丢。
+
+**加新服务**（如火山下别的语音种类）：
+1. `ServiceContent` 枚举加 case + 写对应 `*CardView`。
+2. 写该服务的 Provider（取数 + test）。
+3. `AccountConfig` 加对应开关字段（保持防御式 Codable）。
+4. 用哪个加哪个，不用一次做完。
 
 ## 刻意不做（保持简洁）
 
-- ❌ 不做账号登录 UI（凭证走 arkcli profile / 本地配置）。
+- ❌ 不做账号密码登录 UI（只用 AK/SK）。
 - ❌ 不做历史曲线、图表、系统通知推送。
 - ❌ 不做统一额度抽象 / 格式转换（各服务原样展示）。
 - ❌ 不做菜单栏轮换/自动挑选（用户勾选固定一个）。
