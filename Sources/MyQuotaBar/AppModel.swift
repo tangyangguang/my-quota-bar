@@ -44,13 +44,12 @@ final class AppModel {
 
     /// Agent Plan 对应的 arkcli profile 名。可在设置里选；未选时启动自动发现。
     private(set) var arkPlanProfile: String = AppSettings.agentPlanProfile ?? ""
-    private let arkPlanFallbackName = "Agent Plan 账号"
     /// 本机可用的 arkcli profile 列表（设置里下拉选择）。
     private(set) var arkProfiles: [ArkProfile] = []
 
     private let speechAccountID = "speech-account-b"
-    private var speechAccountName = "火山引擎 · 语音账号"
     @ObservationIgnored private var speechAccountIDFetched = false
+    private let platformName = "火山引擎"
 
     // MARK: 服务可见性（设置里可勾选显示/隐藏）
 
@@ -120,7 +119,7 @@ final class AppModel {
                     for period in plan.periods {
                         metrics.append(MenuBarMetric(
                             id: metricID(account: account, service: service, sub: period.label),
-                            groupLabel: account.name,
+                            groupLabel: account.displayName,
                             optionLabel: period.displayName,
                             symbol: "a.circle",   // Agent Plan 用 a 字图标，窄
                             display: .percent(period.remainingPercent)
@@ -129,7 +128,7 @@ final class AppModel {
                 case .speech(let pack):
                     metrics.append(MenuBarMetric(
                         id: metricID(account: account, service: service, sub: pack.title),
-                        groupLabel: account.name,
+                        groupLabel: account.displayName,
                         optionLabel: pack.title,
                         symbol: pack.unit == "小时" ? "waveform" : "mic",
                         display: .percent(pack.remainingPercent)
@@ -228,37 +227,29 @@ final class AppModel {
                 errorMessage: nil,
                 updatedAt: now
             )
-            upsertAccount(id: arkPlanProfile, name: accountDisplayName(plan), service: service)
+            upsertAccount(id: arkPlanProfile,
+                          platform: platformName,
+                          defaultName: plan.userName?.trimmingCharacters(in: .whitespaces) ?? "",
+                          fullID: plan.accountID,
+                          service: service)
         } catch {
             // 保留上一次有效值，仅标记 error。
             markServiceError(accountID: arkPlanProfile, serviceID: "agent-plan",
-                             accountName: arkPlanFallbackName, serviceTitle: "Agent Plan",
+                             serviceTitle: "Agent Plan",
                              message: error.localizedDescription)
         }
     }
 
-    /// 用 arkcli 返回的真实账号信息命名分组：平台 + 账号名 + 末位 ID。
-    private func accountDisplayName(_ plan: AgentPlan) -> String {
-        let platform = "火山引擎"
-        let name = plan.userName?.trimmingCharacters(in: .whitespaces)
-        let tail = plan.accountID.map { String($0.suffix(4)) }
-        let who: String
-        switch (name, tail) {
-        case let (n?, t?) where !n.isEmpty: who = "\(n) (…\(t))"
-        case let (n?, nil) where !n.isEmpty: who = n
-        case let (_, t?): who = "账号 …\(t)"
-        default: return arkPlanFallbackName
-        }
-        return "\(platform) · \(who)"
-    }
-
     // MARK: 账号B · 语音服务
+
+    /// 语音账号自动获取到的信息（用于命名）。
+    @ObservationIgnored private var speechFullID: String?
 
     /// 清除语音账号（用户在设置里清除密钥时）。
     func clearSpeechAccount() {
         accounts.removeAll { $0.id == speechAccountID }
         speechAccountIDFetched = false
-        speechAccountName = "火山引擎 · 语音账号"
+        speechFullID = nil
     }
 
     private func refreshSpeech() async {
@@ -271,11 +262,9 @@ final class AppModel {
 
         let provider = SpeechProvider(accessKeyID: ak, secretAccessKey: sk, appID: appID)
         do {
-            // 首次拉取账号 ID，用于命名（与 Agent Plan 对齐：平台 · 名称 (…尾号)）。
+            // 首次拉取账号 ID，用于命名（与 Agent Plan 对齐）。
             if !speechAccountIDFetched {
-                if let acctID = await provider.fetchAccountID() {
-                    speechAccountName = "火山引擎 · 账号 (…\(acctID.suffix(4)))"
-                }
+                speechFullID = await provider.fetchAccountID()
                 speechAccountIDFetched = true
             }
             let packs = try await provider.fetch()
@@ -294,7 +283,9 @@ final class AppModel {
                 // 配了密钥但没查到资源包：不报错，只移除该账号。
                 accounts.removeAll { $0.id == speechAccountID }
             } else {
-                setAccountServices(id: speechAccountID, name: speechAccountName, services: services)
+                setAccountServices(id: speechAccountID, platform: platformName,
+                                   defaultName: "语音账号", fullID: speechFullID,
+                                   services: services)
             }
         } catch {
             markSpeechError(message: error.localizedDescription)
@@ -317,37 +308,68 @@ final class AppModel {
                 content: .speech(placeholder),
                 status: .error, errorMessage: message, updatedAt: nil
             )
-            upsertAccount(id: speechAccountID, name: speechAccountName, service: service)
+            upsertAccount(id: speechAccountID, platform: platformName,
+                          defaultName: "语音账号", fullID: speechFullID, service: service)
+        }
+    }
+
+    // MARK: 账号别名
+
+    /// 设置账号别名（nil / 空 = 恢复默认用户名）。
+    func setAlias(_ alias: String?, for accountID: String) {
+        AppSettings.setAlias(alias, for: accountID)
+        if let ai = accounts.firstIndex(where: { $0.id == accountID }) {
+            accounts[ai].alias = (alias?.isEmpty == false) ? alias : nil
         }
     }
 
     // MARK: 账号/服务写入
 
+    /// 构造账号元数据（平台/默认名/ID 尾号/完整 ID/别名）并写入字段。
+    private func applyMeta(_ i: Int, platform: String, defaultName: String, fullID: String?) {
+        accounts[i].platform = platform
+        accounts[i].defaultName = defaultName
+        accounts[i].fullID = fullID
+        accounts[i].idTail = fullID.map { String($0.suffix(4)) }
+        accounts[i].alias = AppSettings.alias(for: accounts[i].id)
+    }
+
+    private func makeAccount(id: String, platform: String, defaultName: String,
+                             fullID: String?, services: [Service]) -> Account {
+        Account(id: id, platform: platform, defaultName: defaultName,
+                idTail: fullID.map { String($0.suffix(4)) }, fullID: fullID,
+                alias: AppSettings.alias(for: id), services: services)
+    }
+
     /// 整个替换一个账号的服务列表（用于刷新成功时重建，清掉旧残留）。
-    private func setAccountServices(id: String, name: String, services: [Service]) {
+    private func setAccountServices(id: String, platform: String, defaultName: String,
+                                    fullID: String?, services: [Service]) {
         if let ai = accounts.firstIndex(where: { $0.id == id }) {
             accounts[ai].services = services
-            accounts[ai].name = name
+            applyMeta(ai, platform: platform, defaultName: defaultName, fullID: fullID)
         } else {
-            accounts.append(Account(id: id, name: name, services: services))
+            accounts.append(makeAccount(id: id, platform: platform, defaultName: defaultName,
+                                        fullID: fullID, services: services))
         }
     }
 
-    private func upsertAccount(id: String, name: String, service: Service) {
+    private func upsertAccount(id: String, platform: String, defaultName: String,
+                              fullID: String?, service: Service) {
         if let ai = accounts.firstIndex(where: { $0.id == id }) {
             if let si = accounts[ai].services.firstIndex(where: { $0.id == service.id }) {
                 accounts[ai].services[si] = service
             } else {
                 accounts[ai].services.append(service)
             }
-            accounts[ai].name = name
+            applyMeta(ai, platform: platform, defaultName: defaultName, fullID: fullID)
         } else {
-            accounts.append(Account(id: id, name: name, services: [service]))
+            accounts.append(makeAccount(id: id, platform: platform, defaultName: defaultName,
+                                        fullID: fullID, services: [service]))
         }
     }
 
     private func markServiceError(accountID: String, serviceID: String,
-                                  accountName: String, serviceTitle: String, message: String) {
+                                  serviceTitle: String, message: String) {
         if let ai = accounts.firstIndex(where: { $0.id == accountID }),
            let si = accounts[ai].services.firstIndex(where: { $0.id == serviceID }) {
             accounts[ai].services[si].status = .error
@@ -359,7 +381,8 @@ final class AppModel {
                 content: .agentPlan(AgentPlan(tier: "", edition: "", unit: "AFP", periods: [])),
                 status: .error, errorMessage: message, updatedAt: nil
             )
-            upsertAccount(id: accountID, name: accountName, service: service)
+            upsertAccount(id: accountID, platform: platformName, defaultName: "",
+                          fullID: nil, service: service)
         }
     }
 }

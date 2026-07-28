@@ -122,6 +122,29 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertThrowsError(try ArkPlanProvider.parse("{}"))  // 缺 items
     }
 
+    // MARK: - 账号显示名（别名 > 默认名 > “账号”，拼尾号）
+
+    func testAccountDisplayName() {
+        func acc(def: String, tail: String?, alias: String?) -> Account {
+            Account(id: "x", platform: "火山引擎", defaultName: def,
+                    idTail: tail, fullID: nil, alias: alias, services: [])
+        }
+        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: nil).displayName, "火山引擎 · 张三 (…7443)")
+        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "工作号").displayName, "火山引擎 · 工作号 (…7443)")
+        XCTAssertEqual(acc(def: "", tail: "1074", alias: nil).displayName, "火山引擎 · 账号 (…1074)")
+        XCTAssertEqual(acc(def: "张三", tail: nil, alias: nil).displayName, "火山引擎 · 张三")
+        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "").displayName, "火山引擎 · 张三 (…7443)")
+    }
+
+    func testAccountEffectiveName() {
+        let a = Account(id: "x", platform: "P", defaultName: "张三", idTail: nil,
+                        fullID: nil, alias: "别名", services: [])
+        XCTAssertEqual(a.effectiveName, "别名")
+        let b = Account(id: "x", platform: "P", defaultName: "张三", idTail: nil,
+                        fullID: nil, alias: nil, services: [])
+        XCTAssertEqual(b.effectiveName, "张三")
+    }
+
     // MARK: - 重置倒计时文案（分/时/天边界 + 过去时间）
 
     func testRelativeReset() {

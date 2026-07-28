@@ -10,8 +10,28 @@ import Foundation
 /// 一个火山账号（一份身份 / 一份免费额度）。
 struct Account: Identifiable, Equatable, Sendable {
     let id: String            // 稳定标识，通常用 arkcli profile 名
-    var name: String          // 显示名，如「账号A · Agent Plan」
+    var platform: String      // 平台名，如「火山引擎」
+    var defaultName: String   // 自动获取的名字（用户名）；语音拿不到则为空
+    var idTail: String?       // 账号 ID 后四位（自动生成）
+    var fullID: String?       // 完整账号 ID（设置页展示全量）
+    var alias: String?        // 用户自定义别名（覆盖 defaultName）
     var services: [Service]
+
+    /// 面板/菜单栏显示名：平台 · (别名或默认名) (…尾号)。空间有限只显示后四位。
+    var displayName: String {
+        let base: String
+        if let a = alias, !a.isEmpty { base = a }
+        else if !defaultName.isEmpty { base = defaultName }
+        else { base = "账号" }
+        if let t = idTail, !t.isEmpty { return "\(platform) · \(base) (…\(t))" }
+        return "\(platform) · \(base)"
+    }
+
+    /// 别名生效时用的名字（用户没设别名则回落默认名）。
+    var effectiveName: String {
+        if let a = alias, !a.isEmpty { return a }
+        return defaultName
+    }
 }
 
 /// 账号下的一项服务。内容形态各异，用 ServiceContent 承载。

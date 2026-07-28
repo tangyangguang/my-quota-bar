@@ -1,28 +1,106 @@
 import SwiftUI
 
-/// 独立设置窗口（方案 C）：分区组织，空间充足，永不超出菜单栏面板。
+// MARK: - 设置草稿：所有编辑先暂存，点“保存并应用”才生效，“取消”丢弃。
+
+@MainActor
+@Observable
+final class SettingsDraft {
+    var selectedMetricID = ""
+    var intervalAgent = 180
+    var intervalSpeech = 180
+    var agentPlanProfile = ""
+    var ak = ""
+    var sk = ""
+    var appID = ""
+    var aliases: [String: String] = [:]   // accountID -> 别名输入框内容
+    var hidden: Set<String> = []          // 被隐藏的服务 ID
+
+    /// 从当前生效状态载入（每次打开设置窗口时调用）。
+    func load(from model: AppModel) {
+        selectedMetricID = model.currentMetric?.id ?? ""
+        intervalAgent = model.interval(for: .agentPlan)
+        intervalSpeech = model.interval(for: .speech)
+        agentPlanProfile = model.arkPlanProfile
+        ak = SpeechCredentials.accessKeyID
+        sk = SpeechCredentials.secretAccessKey
+        appID = SpeechCredentials.appID
+        hidden = model.hiddenServiceIDs
+        aliases = [:]
+        for a in model.accounts { aliases[a.id] = a.effectiveName }
+    }
+
+    /// 一次性把全部草稿应用到模型 + 持久化，并触发刷新。
+    func apply(to model: AppModel) {
+        if !selectedMetricID.isEmpty { model.selectedMetricID = selectedMetricID }
+        model.setInterval(intervalAgent, for: .agentPlan)
+        model.setInterval(intervalSpeech, for: .speech)
+        if agentPlanProfile != model.arkPlanProfile, !agentPlanProfile.isEmpty {
+            model.selectAgentPlanProfile(agentPlanProfile)
+        }
+        model.hiddenServiceIDs = hidden
+
+        for a in model.accounts {
+            let trimmed = (aliases[a.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            model.setAlias((trimmed.isEmpty || trimmed == a.defaultName) ? nil : trimmed, for: a.id)
+        }
+
+        let akT = ak.trimmingCharacters(in: .whitespacesAndNewlines)
+        let skT = sk.trimmingCharacters(in: .whitespacesAndNewlines)
+        let idT = appID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if akT.isEmpty && skT.isEmpty && idT.isEmpty {
+            SpeechCredentials.accessKeyID = ""
+            SpeechCredentials.secretAccessKey = ""
+            SpeechCredentials.appID = ""
+            model.clearSpeechAccount()
+        } else {
+            SpeechCredentials.accessKeyID = akT
+            SpeechCredentials.secretAccessKey = skT
+            SpeechCredentials.appID = idT
+        }
+        model.refresh()
+    }
+}
+
+/// 独立设置窗口：暂存式编辑 + 底部统一「保存并应用 / 取消」。
 struct SettingsWindow: View {
     @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = SettingsDraft()
 
     var body: some View {
-        TabView {
-            DisplaySettingsTab(model: model)
-                .tabItem { Label("显示", systemImage: "menubar.rectangle") }
+        VStack(spacing: 0) {
+            TabView {
+                DisplaySettingsTab(model: model, draft: draft)
+                    .tabItem { Label("显示", systemImage: "menubar.rectangle") }
+                AccountsServicesTab(model: model, draft: draft)
+                    .tabItem { Label("账号与服务", systemImage: "checklist") }
+                CredentialsTab(model: model, draft: draft)
+                    .tabItem { Label("密钥", systemImage: "key") }
+            }
 
-            ServicesSettingsTab(model: model)
-                .tabItem { Label("服务", systemImage: "checklist") }
-
-            AccountsSettingsTab(model: model)
-                .tabItem { Label("密钥", systemImage: "key") }
+            Divider()
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存并应用") {
+                    draft.apply(to: model)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
         }
-        .frame(width: 480, height: 440)
+        .frame(width: 500, height: 480)
+        .onAppear { draft.load(from: model) }
     }
 }
 
 // MARK: - Tab 1：菜单栏显示 + 各源刷新间隔
 
 struct DisplaySettingsTab: View {
-    @Bindable var model: AppModel
+    let model: AppModel
+    @Bindable var draft: SettingsDraft
 
     private let intervals: [(String, Int)] = [
         ("1 分钟", 60), ("2 分钟", 120), ("3 分钟", 180), ("5 分钟", 300), ("10 分钟", 600)
@@ -34,10 +112,7 @@ struct DisplaySettingsTab: View {
                 if model.availableMetrics.isEmpty {
                     Text("暂无可选指标").foregroundStyle(.secondary)
                 } else {
-                    Picker("显示指标", selection: Binding(
-                        get: { model.currentMetric?.id ?? "" },
-                        set: { model.selectedMetricID = $0 }
-                    )) {
+                    Picker("显示指标", selection: $draft.selectedMetricID) {
                         ForEach(model.availableMetrics) { m in
                             Text(m.label).tag(m.id)
                         }
@@ -47,14 +122,11 @@ struct DisplaySettingsTab: View {
             }
 
             Section {
-                ForEach(AppModel.RefreshSource.allCases, id: \.self) { source in
-                    Picker(source.displayName, selection: Binding(
-                        get: { model.interval(for: source) },
-                        set: { model.setInterval($0, for: source) }
-                    )) {
-                        ForEach(intervals, id: \.1) { Text($0.0).tag($0.1) }
-                    }
-                    .pickerStyle(.menu)
+                Picker("火山引擎 · Agent Plan", selection: $draft.intervalAgent) {
+                    ForEach(intervals, id: \.1) { Text($0.0).tag($0.1) }
+                }
+                Picker("火山引擎 · 语音服务", selection: $draft.intervalSpeech) {
+                    ForEach(intervals, id: \.1) { Text($0.0).tag($0.1) }
                 }
             } header: {
                 Text("刷新间隔（各服务独立）")
@@ -67,49 +139,61 @@ struct DisplaySettingsTab: View {
     }
 }
 
-// MARK: - Tab 2：服务显示/隐藏
+// MARK: - Tab 2：账号别名 + 服务显示/隐藏（两级）
 
-struct ServicesSettingsTab: View {
-    @Bindable var model: AppModel
+struct AccountsServicesTab: View {
+    let model: AppModel
+    @Bindable var draft: SettingsDraft
 
     var body: some View {
         Form {
-            Section {
-                if model.accounts.isEmpty {
-                    Text("暂无服务").foregroundStyle(.secondary)
-                }
-                ForEach(model.accounts) { account in
-                    ForEach(account.services) { service in
-                        Toggle(isOn: Binding(
-                            get: { model.isServiceVisible(accountID: account.id, serviceID: service.id) },
-                            set: { model.setService(accountID: account.id, serviceID: service.id, visible: $0) }
-                        )) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(service.title).font(.system(size: 13))
-                                Text(account.name).font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
+            if model.accounts.isEmpty {
+                Section { Text("暂无账号").foregroundStyle(.secondary) }
+            }
+            ForEach(model.accounts) { account in
+                Section {
+                    // 别名编辑（暂存，保存后生效）
+                    HStack(spacing: 6) {
+                        TextField("账号别名", text: Binding(
+                            get: { draft.aliases[account.id] ?? account.effectiveName },
+                            set: { draft.aliases[account.id] = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        Button("重置") { draft.aliases[account.id] = account.defaultName }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("把输入框恢复为默认名（自动获取的用户名）")
                     }
+                    Text("默认名：\(account.defaultName.isEmpty ? "（未获取到）" : account.defaultName)　账号 ID：\(account.fullID ?? "未知")")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+
+                    // 该账号下的服务开关
+                    ForEach(account.services) { service in
+                        Toggle(service.title, isOn: Binding(
+                            get: { !draft.hidden.contains("\(account.id)/\(service.id)") },
+                            set: { on in
+                                let key = "\(account.id)/\(service.id)"
+                                if on { draft.hidden.remove(key) } else { draft.hidden.insert(key) }
+                            }
+                        ))
+                    }
+                } header: {
+                    Text(account.platform)
                 }
-            } header: {
-                Text("选择在面板显示哪些服务")
-            } footer: {
-                Text("关闭后该服务不在面板显示、也不出现在菜单栏可选项里（比如额度用完不想看）。")
-                    .font(.caption)
             }
         }
         .formStyle(.grouped)
     }
 }
 
-// MARK: - Tab 3：语音服务密钥（AK/SK）
+// MARK: - Tab 3：Agent Plan profile + 语音密钥
 
-struct AccountsSettingsTab: View {
-    @Bindable var model: AppModel
-    @State private var ak = ""
-    @State private var sk = ""
-    @State private var appID = ""
-    @State private var savedTip = false
+struct CredentialsTab: View {
+    let model: AppModel
+    @Bindable var draft: SettingsDraft
+    @State private var confirmClear = false
 
     var body: some View {
         Form {
@@ -118,10 +202,7 @@ struct AccountsSettingsTab: View {
                     Text("未检测到 arkcli profile。请先安装 arkcli 并登录。")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Picker("Agent Plan 账号", selection: Binding(
-                        get: { model.arkPlanProfile },
-                        set: { model.selectAgentPlanProfile($0) }
-                    )) {
+                    Picker("Agent Plan 账号", selection: $draft.agentPlanProfile) {
                         ForEach(model.arkProfiles) { p in
                             Text("\(p.displayName)（\(p.name)）").tag(p.name)
                         }
@@ -136,60 +217,44 @@ struct AccountsSettingsTab: View {
             }
 
             Section {
-                RevealableField(title: "Access Key ID", text: $ak)
-                RevealableField(title: "Secret Access Key", text: $sk)
-                TextField("应用 AppID", text: $appID)
+                RevealableField(title: "Access Key ID", text: $draft.ak)
+                RevealableField(title: "Secret Access Key", text: $draft.sk)
+                TextField("应用 AppID", text: $draft.appID)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
-
-                HStack {
-                    Button("保存并刷新") { save() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(ak.isEmpty || sk.isEmpty || appID.isEmpty)
-                    if SpeechCredentials.isConfigured {
-                        Button("清除") { clear() }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.red)
-                    }
-                    Spacer()
-                    if savedTip {
-                        Label("已保存到钥匙串", systemImage: "checkmark.seal.fill")
-                            .font(.caption).foregroundStyle(.green)
-                    } else if SpeechCredentials.isConfigured {
-                        Label("已配置", systemImage: "checkmark.seal.fill")
-                            .font(.caption).foregroundStyle(.green)
-                    }
-                }
             } header: {
                 Text("火山引擎 · 语音服务（ASR / TTS）密钥")
             } footer: {
-                Text("Access Key / Secret Key 加密存入 macOS 钥匙串，纯本地。配置后才会显示语音额度；清除后自动隐藏。")
+                Text("Access Key / Secret Key 加密存入 macOS 钥匙串，纯本地。三项填全才会显示语音额度。")
+                    .font(.caption)
+            }
+
+            // 危险操作单独一区，远离保存
+            Section {
+                Button(role: .destructive) {
+                    confirmClear = true
+                } label: {
+                    Label("清空密钥", systemImage: "trash")
+                }
+                .disabled(draft.ak.isEmpty && draft.sk.isEmpty && draft.appID.isEmpty)
+                .confirmationDialog(
+                    "确定清空语音密钥？",
+                    isPresented: $confirmClear,
+                    titleVisibility: .visible
+                ) {
+                    Button("清空", role: .destructive) {
+                        draft.ak = ""; draft.sk = ""; draft.appID = ""
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("清空后点“保存并应用”才生效，届时会从面板移除语音服务。此刻取消或关闭窗口不会改动已保存的密钥。")
+                }
+            } footer: {
+                Text("清空只清输入框；保存后才真正从钥匙串删除。")
                     .font(.caption)
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            ak = SpeechCredentials.accessKeyID
-            sk = SpeechCredentials.secretAccessKey
-            appID = SpeechCredentials.appID
-        }
-    }
-
-    private func save() {
-        SpeechCredentials.accessKeyID = ak.trimmingCharacters(in: .whitespacesAndNewlines)
-        SpeechCredentials.secretAccessKey = sk.trimmingCharacters(in: .whitespacesAndNewlines)
-        SpeechCredentials.appID = appID.trimmingCharacters(in: .whitespacesAndNewlines)
-        savedTip = true
-        model.refresh()
-    }
-
-    private func clear() {
-        SpeechCredentials.accessKeyID = ""
-        SpeechCredentials.secretAccessKey = ""
-        SpeechCredentials.appID = ""
-        ak = ""; sk = ""; appID = ""
-        savedTip = false
-        model.clearSpeechAccount()
     }
 }
 

@@ -42,4 +42,14 @@ enum AppSettings {
         }
     }
     private static let agentProfileKey = "agentPlanProfile"
+
+    /// 账号别名（用户自定义）。键为账号 ID，值为别名；nil = 未设（用默认用户名）。
+    static func alias(for accountID: String) -> String? {
+        UserDefaults.standard.string(forKey: "accountAlias_\(accountID)")
+    }
+    static func setAlias(_ alias: String?, for accountID: String) {
+        let key = "accountAlias_\(accountID)"
+        if let a = alias, !a.isEmpty { UserDefaults.standard.set(a, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
 }

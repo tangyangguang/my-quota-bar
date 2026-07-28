@@ -10,7 +10,7 @@ struct AccountSectionView: View {
                 Image(systemName: "person.crop.circle")
                     .imageScale(.small)
                     .foregroundStyle(.secondary)
-                Text(account.name)
+                Text(account.displayName)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
