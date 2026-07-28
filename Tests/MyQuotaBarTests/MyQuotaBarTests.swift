@@ -8,26 +8,24 @@ final class MyQuotaBarTests: XCTestCase {
     // MARK: - Formatting：用户看到的数字格式（原样、去尾零、限位）
 
     func testFormattingRaw() {
-        // 保留至多 3 位小数，去掉末尾多余零；不做 k/w 压缩
         XCTAssertEqual(Formatting.raw(1793.747), "1793.747")
-        XCTAssertEqual(Formatting.raw(10000), "10000")           // 整数不带 .0
-        XCTAssertEqual(Formatting.raw(25873.6460), "25873.646")  // 去尾零
+        XCTAssertEqual(Formatting.raw(10000), "10000")
+        XCTAssertEqual(Formatting.raw(25873.6460), "25873.646")
         XCTAssertEqual(Formatting.raw(0.5), "0.5")
         XCTAssertEqual(Formatting.raw(0), "0")
         XCTAssertEqual(Formatting.raw(8.790), "8.79")
-        // 第 4 位小数被四舍五入到 3 位
         XCTAssertEqual(Formatting.raw(1.23449), "1.234")
     }
 
     func testFormattingPercent() {
-        XCTAssertEqual(Formatting.percent(78), "78")       // 整数不带 .0
+        XCTAssertEqual(Formatting.percent(78), "78")
         XCTAssertEqual(Formatting.percent(78.5), "78.5")
-        XCTAssertEqual(Formatting.percent(78.54), "78.5")  // 限 1 位
+        XCTAssertEqual(Formatting.percent(78.54), "78.5")
         XCTAssertEqual(Formatting.percent(0), "0")
         XCTAssertEqual(Formatting.percent(100), "100")
     }
 
-    // MARK: - 百分比计算：除零保护 + 越界裁剪（进度条/剩余标签命脉）
+    // MARK: - 百分比计算：除零保护 + 越界裁剪
 
     func testAgentPlanRemainingPercent() {
         let p = AgentPlanPeriod(label: "5h", used: 22, total: 100, percent: 22, resetAt: nil)
@@ -35,10 +33,8 @@ final class MyQuotaBarTests: XCTestCase {
     }
 
     func testAgentPlanPercentClamp() {
-        // 超用（percent > 100）时剩余不应为负
         let over = AgentPlanPeriod(label: "5h", used: 120, total: 100, percent: 120, resetAt: nil)
         XCTAssertEqual(over.remainingPercent, 0)
-        // percent < 0 的异常输入，剩余不超过 100
         let neg = AgentPlanPeriod(label: "5h", used: 0, total: 100, percent: -5, resetAt: nil)
         XCTAssertEqual(neg.remainingPercent, 100)
     }
@@ -52,74 +48,79 @@ final class MyQuotaBarTests: XCTestCase {
     }
 
     func testSpeechPackDivideByZero() {
-        // 未购买（purchasedValue = 0）不能崩，也不能得 NaN
         let pack = SpeechPack(title: "x", purchased: "", used: "", unit: "",
                               purchasedValue: 0, usedValue: 0, expires: "", type: "")
         XCTAssertEqual(pack.remainingPercent, 0)
         XCTAssertEqual(pack.usedPercent, 0)
     }
 
-    // MARK: - 语音数值抽取：从 "20,000 次" / "8.79 小时" 抽数（逗号/小数/单位）
+    // MARK: - 语音数值抽取：从 "20,000 次" / "8.79 小时" 抽数
 
     func testNumberFromLoose() {
-        XCTAssertEqual(SpeechProvider.numberFromLoose("20,000 次"), 20000)   // 去千分位逗号
-        XCTAssertEqual(SpeechProvider.numberFromLoose("8.79 小时"), 8.79)    // 带小数
+        XCTAssertEqual(SpeechProvider.numberFromLoose("20,000 次"), 20000)
+        XCTAssertEqual(SpeechProvider.numberFromLoose("8.79 小时"), 8.79)
         XCTAssertEqual(SpeechProvider.numberFromLoose("34 次"), 34)
         XCTAssertEqual(SpeechProvider.numberFromLoose("20.00 小时"), 20)
-        XCTAssertEqual(SpeechProvider.numberFromLoose(""), 0)               // 空串
-        XCTAssertEqual(SpeechProvider.numberFromLoose("无数字"), 0)          // 无数字
-        XCTAssertEqual(SpeechProvider.numberFromLoose("1,234.5 万"), 1234.5) // 逗号+小数
+        XCTAssertEqual(SpeechProvider.numberFromLoose(""), 0)
+        XCTAssertEqual(SpeechProvider.numberFromLoose("无数字"), 0)
+        XCTAssertEqual(SpeechProvider.numberFromLoose("1,234.5 万"), 1234.5)
     }
 
-    // MARK: - Agent Plan 解析：字段抽取 + 窗口排序 + 缺字段处理
+    // MARK: - Agent Plan AFP API 解析（GetAFPUsage 响应格式）
 
-    func testParseAgentPlanBasic() throws {
-        let json = """
-        {
-          "viewer": { "user_name": "张三", "account_id": "2104007443" },
-          "items": [{
-            "product": "agent-plan",
-            "tier": "medium",
-            "edition": "personal",
-            "periods": [
-              { "label": "monthly", "used": 100, "total": 1000, "percent": 10 },
-              { "label": "5h", "used": 22, "total": 100, "percent": 22 },
-              { "label": "weekly", "used": 50, "total": 500, "percent": 10 }
+    /// 模拟一次完整的 AFP 响应。
+    private func afpJSON(tier: String = "medium",
+                         fiveHour: [String: Any] = ["Quota": 10000, "Used": 660.94, "ResetTime": 1785236766000],
+                         weekly: [String: Any] = ["Quota": 35000, "Used": 22289.18, "ResetTime": 1785686400000],
+                         monthly: [String: Any] = ["Quota": 100000, "Used": 38528.53, "ResetTime": 1786809599000]) -> Data {
+        let dict: [String: Any] = [
+            "ResponseMetadata": ["Action": "GetAFPUsage", "Version": "2024-01-01", "Service": "ark", "Region": "cn-beijing"],
+            "Result": [
+                "PlanType": tier,
+                "AFPFiveHour": fiveHour,
+                "AFPWeekly": weekly,
+                "AFPMonthly": monthly
             ]
-          }]
-        }
-        """
-        let plan = try ArkPlanProvider.parse(json)
+        ]
+        return try! JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+    }
+
+    func testParseAFPBasic() throws {
+        let data = afpJSON()
+        let plan = try AgentPlanProvider.parse(data)
         XCTAssertEqual(plan.tier, "medium")
-        XCTAssertEqual(plan.userName, "张三")
-        XCTAssertEqual(plan.accountID, "2104007443")
-        // 必须按 5h → weekly → monthly 排序（不受输入顺序影响）
+        XCTAssertEqual(plan.edition, "personal")
+        XCTAssertEqual(plan.unit, "AFP")
         XCTAssertEqual(plan.periods.map(\.label), ["5h", "weekly", "monthly"])
-        XCTAssertEqual(plan.periods[0].used, 22)
+        // 5h: 660.94 / 10000 = 6.6094%
+        XCTAssertEqual(plan.periods[0].used, 660.94, accuracy: 0.001)
+        XCTAssertEqual(plan.periods[0].total, 10000)
+        XCTAssertEqual(plan.periods[0].remainingPercent, 100 - 660.94 / 10000 * 100, accuracy: 0.001)
     }
 
-    func testParseAgentPlanComputesPercentWhenMissing() throws {
-        // percent 缺失时用 used/total 算
-        let json = """
-        { "items": [{ "product": "agent-plan",
-          "periods": [{ "label": "5h", "used": 25, "total": 100 }] }] }
-        """
-        let plan = try ArkPlanProvider.parse(json)
-        XCTAssertEqual(plan.periods[0].percent, 25, accuracy: 0.001)
-        XCTAssertEqual(plan.periods[0].remainingPercent, 75, accuracy: 0.001)
+    func testParseAFPEmptyPeriodThrows() {
+        // 没有 Quota 的周期应跳过；全部跳过则抛错
+        let data = afpJSON(fiveHour: [:], weekly: [:], monthly: [:])
+        XCTAssertThrowsError(try AgentPlanProvider.parse(data))
     }
 
-    func testParseAgentPlanEmptyThrows() {
-        // 没有 periods 应抛错（不静默返回空卡）
-        let json = """
-        { "items": [{ "product": "agent-plan", "periods": [] }] }
-        """
-        XCTAssertThrowsError(try ArkPlanProvider.parse(json))
+    func testParseAFPBadJSONThrows() {
+        let bad = Data("not json".utf8)
+        XCTAssertThrowsError(try AgentPlanProvider.parse(bad))
+        // 缺 Result 顶层字段
+        let noResult = try! JSONSerialization.data(withJSONObject: ["ResponseMetadata": [:]], options: [])
+        XCTAssertThrowsError(try AgentPlanProvider.parse(noResult))
     }
 
-    func testParseAgentPlanBadJSONThrows() {
-        XCTAssertThrowsError(try ArkPlanProvider.parse("not json"))
-        XCTAssertThrowsError(try ArkPlanProvider.parse("{}"))  // 缺 items
+    func testParseAFPErrorResponse() throws {
+        // 错误响应
+        let err: [String: Any] = [
+            "ResponseMetadata": [
+                "Error": ["Code": "AuthFailure", "Message": "InvalidAccessKeyId"]
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: err, options: [.sortedKeys])
+        XCTAssertThrowsError(try AgentPlanProvider.parse(data))
     }
 
     // MARK: - 账号显示名（别名 > 默认名 > “账号”，拼尾号）
@@ -145,6 +146,38 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(b.effectiveName, "张三")
     }
 
+    // MARK: - 配置持久化防丢失（旧 schema JSON 仍能解析）
+
+    func testAccountConfigDecodesLegacyJSON() throws {
+        // 模拟早期版本存的 JSON：没有 platform 字段
+        let legacy = """
+        {"id":"abc","alias":"主账号","enableAgentPlan":true,"speechApps":[]}
+        """
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(legacy.utf8))
+        XCTAssertEqual(config.id, "abc")
+        XCTAssertEqual(config.alias, "主账号")
+        XCTAssertTrue(config.enableAgentPlan)
+        XCTAssertEqual(config.platform, .volcengine)   // 缺失 platform 回落火山
+    }
+
+    func testAccountConfigDecodesUnknownPlatform() throws {
+        // 未来降级：JSON 里是本版本不认识的平台
+        let future = """
+        {"id":"x","platform":"unknown_platform","alias":"","enableAgentPlan":false,"speechApps":[]}
+        """
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(future.utf8))
+        XCTAssertEqual(config.platform, .volcengine)   // 未知平台回落，不崩
+    }
+
+    func testAccountConfigRoundTrip() throws {
+        let apps = [SpeechApp(id: "s1", appID: "123", label: "应用A")]
+        let orig = AccountConfig(id: "acc1", platform: .volcengine, alias: "测试",
+                                 accountFullID: "2104007443", enableAgentPlan: true, speechApps: apps)
+        let data = try JSONEncoder().encode(orig)
+        let back = try JSONDecoder().decode(AccountConfig.self, from: data)
+        XCTAssertEqual(orig, back)
+    }
+
     // MARK: - 重置倒计时文案（分/时/天边界 + 过去时间）
 
     func testRelativeReset() {
@@ -152,11 +185,11 @@ final class MyQuotaBarTests: XCTestCase {
         func at(_ secs: TimeInterval) -> String {
             RelativeReset.text(to: now.addingTimeInterval(secs), now: now)
         }
-        XCTAssertEqual(at(-10), "即将重置")           // 已过期
-        XCTAssertEqual(at(30 * 60), "30 分钟后重置")   // 30 分钟
+        XCTAssertEqual(at(-10), "即将重置")
+        XCTAssertEqual(at(30 * 60), "30 分钟后重置")
         XCTAssertEqual(at(90 * 60), "1 小时 30 分后重置")
-        XCTAssertEqual(at(120 * 60), "2 小时后重置")   // 整点无余分
+        XCTAssertEqual(at(120 * 60), "2 小时后重置")
         XCTAssertEqual(at(25 * 3600), "1 天 1 小时后重置")
-        XCTAssertEqual(at(48 * 3600), "2 天后重置")    // 整天无余时
+        XCTAssertEqual(at(48 * 3600), "2 天后重置")
     }
 }

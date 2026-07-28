@@ -1,5 +1,26 @@
 import Foundation
 
+// MARK: - 平台
+
+/// 平台目录。新增平台在此加一个 case（并在对应地方接入它的认证/服务）。
+/// 用 rawValue 作为持久化标识（存 JSON），显示名单独维护。
+enum Platform: String, Codable, CaseIterable, Sendable {
+    case volcengine
+    // 将来： case siliconflow / case aliyun ...
+
+    var displayName: String {
+        switch self {
+        case .volcengine: return "火山引擎"
+        }
+    }
+
+    /// 容错：未知平台标识（旧版数据 / 未来降级）回落火山引擎。
+    static func from(_ raw: String?) -> Platform {
+        guard let raw = raw, let p = Platform(rawValue: raw) else { return .volcengine }
+        return p
+    }
+}
+
 // MARK: - 顶层：账号 → 服务
 //
 // 设计原则（见 PROJECT_RULES.md）：

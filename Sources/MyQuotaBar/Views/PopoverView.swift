@@ -50,7 +50,7 @@ struct PopoverView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
             if !model.isRefreshing {
-                Text("在设置里添加账号密钥或开启显示")
+                Text("在设置里添加账号、填入 AK/SK，并选择要看的服务")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -66,9 +66,11 @@ struct PopoverView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
             .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
 
             Button("刷新") { model.refresh() }
                 .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
                 .disabled(model.isRefreshing)
 
             Spacer()

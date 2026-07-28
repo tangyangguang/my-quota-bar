@@ -6,9 +6,12 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
+    /// 展示用账号列表（由已配置账号 + 拉取到的数据构建）。
     private(set) var accounts: [Account] = [] {
         didSet { rebuildMetrics() }
     }
+    /// 用户配置的账号（持久化）。
+    private(set) var accountConfigs: [AccountConfig] = []
     private(set) var isRefreshing = false
     private(set) var lastRefreshAt: Date?
 
@@ -18,8 +21,10 @@ final class AppModel {
     }
 
     @ObservationIgnored private var timers: [RefreshSource: Timer] = [:]
+    /// 账号 ID -> 该账号完整账号 ID（STS 查得，用于命名尾号）。
+    @ObservationIgnored private var accountFullID_: [String: String] = [:]
 
-    /// 刷新源（每类数据来源一个）。各自独立配置刷新间隔。
+    /// 刷新源（按服务类型分类，用于独立配置刷新间隔）。
     enum RefreshSource: String, CaseIterable {
         case agentPlan = "agent-plan"
         case speech = "speech"
@@ -32,98 +37,114 @@ final class AppModel {
         }
     }
 
-    /// 获取某源的刷新间隔（秒）。
+    /// 各源刷新间隔（秒）。observable 存储属性，写时同步落 UserDefaults；
+    /// 这样 SwiftUI Picker 能直接观察到变化、不会回弹。
+    var refreshIntervals: [String: Int] = [:]
+
     func interval(for source: RefreshSource) -> Int {
-        AppSettings.refreshInterval(for: source.rawValue)
+        refreshIntervals[source.rawValue] ?? AppSettings.refreshInterval(for: source.rawValue)
     }
 
-    /// 设置某源的刷新间隔，并重建该源的定时器。
     func setInterval(_ seconds: Int, for source: RefreshSource) {
+        refreshIntervals[source.rawValue] = seconds
         AppSettings.setRefreshInterval(seconds, for: source.rawValue)
         rescheduleTimer(for: source)
     }
 
-    // MARK: 账号 / 服务配置（新增账号/服务在这里登记）
-
-    /// Agent Plan 对应的 arkcli profile 名。可在设置里选；未选时启动自动发现。
-    private(set) var arkPlanProfile: String = AppSettings.agentPlanProfile ?? ""
-    /// 本机可用的 arkcli profile 列表（设置里下拉选择）。
-    private(set) var arkProfiles: [ArkProfile] = []
-
-    private let speechAccountID = "speech-account-b"
-    @ObservationIgnored private var speechAccountIDFetched = false
-    private let platformName = "火山引擎"
-
-    // MARK: 服务可见性（设置里可勾选显示/隐藏）
-
-    /// 隐藏的服务 ID。隐藏后面板不显示、也不进菜单栏可选项。
-    var hiddenServiceIDs: Set<String> = AppSettings.hiddenServiceIDs {
-        didSet {
-            AppSettings.hiddenServiceIDs = hiddenServiceIDs
-            rebuildMetrics()
-        }
-    }
-
-    func isServiceVisible(accountID: String, serviceID: String) -> Bool {
-        !hiddenServiceIDs.contains("\(accountID)/\(serviceID)")
-    }
-
-    func setService(accountID: String, serviceID: String, visible: Bool) {
-        let key = "\(accountID)/\(serviceID)"
-        if visible { hiddenServiceIDs.remove(key) } else { hiddenServiceIDs.insert(key) }
-    }
-
-    /// 面板实际展示用：过滤掉被隐藏的服务（及因此变空的账号）。
-    var visibleAccounts: [Account] {
-        accounts.compactMap { acct in
-            let services = acct.services.filter { isServiceVisible(accountID: acct.id, serviceID: $0.id) }
-            guard !services.isEmpty else { return nil }
-            var copy = acct
-            copy.services = services
-            return copy
-        }
-    }
-
     init() {
-        // 默认菜单栏固定显示 5 小时窗口（用户仍可在设置里改）。
         selectedMetricID = AppSettings.selectedMetricID
+        for source in RefreshSource.allCases {
+            refreshIntervals[source.rawValue] = AppSettings.refreshInterval(for: source.rawValue)
+        }
+        accountConfigs = AccountStore.load()
+        for c in accountConfigs {
+            if let full = c.accountFullID { accountFullID_[c.id] = full }
+        }
     }
 
-    /// 选定 Agent Plan profile（设置里下拉），并立即刷新。
-    func selectAgentPlanProfile(_ name: String) {
-        guard name != arkPlanProfile else { return }
-        // 清掉旧 profile 对应账号（避免残留）。
-        if !arkPlanProfile.isEmpty {
-            accounts.removeAll { $0.id == arkPlanProfile }
+    // MARK: 账号配置 CRUD（设置窗口调用）
+
+    /// 测试一对 AK/SK：验证身份并拿回账号信息。返回 (成功, 身份信息或错误描述)。
+    func testCredentials(ak: String, sk: String) async -> (ok: Bool, identity: VolcSigner.Identity?, message: String) {
+        let a = ak.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = sk.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !a.isEmpty, !s.isEmpty else { return (false, nil, "请先填写 AK 和 SK") }
+        if let identity = await VolcSigner.fetchIdentity(accessKeyID: a, secretAccessKey: s) {
+            return (true, identity, "连接成功，账号 ID：\(identity.accountID)")
         }
-        arkPlanProfile = name
-        AppSettings.agentPlanProfile = name
-        refreshSource(.agentPlan)
+        return (false, nil, "连接失败：AK/SK 无效或无权限（请核对后重试）")
     }
 
-    /// 启动时发现本机 profile；若用户未选，自动选第一个 agent-plan 类型的。
-    private func discoverProfilesIfNeeded() async {
-        arkProfiles = await ArkProfileLister.list()
-        if arkPlanProfile.isEmpty {
-            if let auto = arkProfiles.first(where: { $0.type == "agent-plan" }) ?? arkProfiles.first {
-                arkPlanProfile = auto.name
-                AppSettings.agentPlanProfile = auto.name
-            }
+    /// 测试某账号的 Agent Plan（用传入的 AK/SK，不依赖已保存）。
+    func testAgentPlan(ak: String, sk: String) async -> (ok: Bool, message: String) {
+        await AgentPlanProvider(accessKeyID: ak.trimmingCharacters(in: .whitespaces),
+                                secretAccessKey: sk.trimmingCharacters(in: .whitespaces)).test()
+    }
+
+    /// 测试某语音应用（用传入的 AK/SK + AppID）。
+    func testSpeechApp(ak: String, sk: String, appID: String) async -> (ok: Bool, message: String) {
+        guard let id = Int(appID.trimmingCharacters(in: .whitespaces)), id > 0 else {
+            return (false, "AppID 需为数字")
         }
+        return await SpeechProvider(accessKeyID: ak.trimmingCharacters(in: .whitespaces),
+                                    secretAccessKey: sk.trimmingCharacters(in: .whitespaces),
+                                    appID: id).test()
+    }
+
+    /// 新增账号。持久化配置 + 凭证，然后刷新。返回新账号 ID。
+    @discardableResult
+    func addAccount(platform: Platform = .volcengine, alias: String, ak: String, sk: String,
+                    accountFullID: String?, enableAgentPlan: Bool, speechApps: [SpeechApp]) -> String {
+        let config = AccountConfig(platform: platform, alias: alias, accountFullID: accountFullID,
+                                   enableAgentPlan: enableAgentPlan, speechApps: speechApps)
+        AccountStore.setCredentials(ak: ak, sk: sk, for: config.id)
+        if let full = accountFullID { accountFullID_[config.id] = full }
+        accountConfigs.append(config)
+        AccountStore.save(accountConfigs)
+        refreshAccountConfig(config)
+        return config.id
+    }
+
+    /// 更新已有账号。ak/sk 传空表示不改动原凭证。
+    func updateAccount(id: String, alias: String, ak: String?, sk: String?, accountFullID: String?,
+                       enableAgentPlan: Bool, speechApps: [SpeechApp]) {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        accountConfigs[idx].alias = alias
+        accountConfigs[idx].enableAgentPlan = enableAgentPlan
+        accountConfigs[idx].speechApps = speechApps
+        if let full = accountFullID { accountConfigs[idx].accountFullID = full }
+        if let ak = ak, let sk = sk {
+            AccountStore.setCredentials(ak: ak, sk: sk, for: id)
+        }
+        AccountStore.save(accountConfigs)
+        if let full = accountConfigs[idx].accountFullID { accountFullID_[id] = full }
+        // 删掉已不存在的展示服务（先清空该账号，重新拉）
+        accounts.removeAll { $0.id == id }
+        refreshAccountConfig(accountConfigs[idx])
+    }
+
+    /// 删除账号：清凭证、清配置、从面板移除。
+    func removeAccount(id: String) {
+        AccountStore.deleteCredentials(for: id)
+        accountConfigs.removeAll { $0.id == id }
+        AccountStore.save(accountConfigs)
+        accounts.removeAll { $0.id == id }
+        accountFullID_[id] = nil
+    }
+
+    func credentials(for id: String) -> (ak: String, sk: String) {
+        (AccountStore.accessKeyID(for: id), AccountStore.secretAccessKey(for: id))
     }
 
     // MARK: 菜单栏文本
 
-    /// 所有可选指标（拍平）。缓存起来，仅在账号/可见性变化时重建，
-    /// 避免 menuBarText/currentMetric 每次渲染都遍历重算。
+    /// 所有可选指标（拍平）。缓存，仅数据变化时重建。
     private(set) var availableMetrics: [MenuBarMetric] = []
 
-    /// 重建指标缓存（数据或隐藏集变化时调用）。
     private func rebuildMetrics() {
         var metrics: [MenuBarMetric] = []
         for account in accounts {
             for service in account.services {
-                if !isServiceVisible(accountID: account.id, serviceID: service.id) { continue }
                 switch service.content {
                 case .agentPlan(let plan):
                     for period in plan.periods {
@@ -131,7 +152,7 @@ final class AppModel {
                             id: metricID(account: account, service: service, sub: period.label),
                             groupLabel: account.displayName,
                             optionLabel: period.displayName,
-                            symbol: "a.circle",   // Agent Plan 用 a 字图标，窄
+                            symbol: "a.circle",
                             display: .percent(period.remainingPercent)
                         ))
                     }
@@ -149,7 +170,6 @@ final class AppModel {
         availableMetrics = metrics
     }
 
-    /// 当前应显示在菜单栏的指标（用户选中的；没选或失效则回退到第一个）。
     var currentMetric: MenuBarMetric? {
         let all = availableMetrics
         if let id = selectedMetricID, let m = all.first(where: { $0.id == id }) {
@@ -158,26 +178,31 @@ final class AppModel {
         return all.first
     }
 
-    var menuBarText: String {
-        currentMetric?.display.menuBarText ?? "--"
-    }
-
-    /// 菜单栏图标（随当前显示的指标/服务变化，选窄体积小的）。
-    var menuBarSymbol: String {
-        currentMetric?.symbol ?? "gauge"
-    }
+    var menuBarText: String { currentMetric?.display.menuBarText ?? "--" }
+    var menuBarSymbol: String { currentMetric?.symbol ?? "gauge" }
 
     private func metricID(account: Account, service: Service, sub: String) -> String {
         "\(account.id)/\(service.id)/\(sub)"
     }
 
+    /// 面板展示用账号列表：按设置里账号的顺序排（与 accountConfigs 一致，可拖动调整）。
+    var visibleAccounts: [Account] {
+        let order = Dictionary(uniqueKeysWithValues: accountConfigs.enumerated().map { ($1.id, $0) })
+        return accounts.sorted { a, b in
+            (order[a.id] ?? Int.max) < (order[b.id] ?? Int.max)
+        }
+    }
+
+    /// 拖动重排账号（侧边栏），影响面板显示顺序。
+    func moveAccounts(from source: IndexSet, to destination: Int) {
+        accountConfigs.move(fromOffsets: source, toOffset: destination)
+        AccountStore.save(accountConfigs)
+    }
+
     // MARK: 刷新调度（每源独立定时器 + 休眠/断网感知 + 懒刷新）
 
-    /// 各源最后一次“成功”刷新时间（用于懒刷新判断）。
     @ObservationIgnored private var lastSuccessAt: [RefreshSource: Date] = [:]
-    /// 是否已暂停（休眠/锁屏/断网）。暂停时定时器不发请求。
     @ObservationIgnored private var paused = false
-    /// 网络是否可用。
     @ObservationIgnored private var networkUp = true
     @ObservationIgnored private var netMonitor: NWPathMonitor?
     @ObservationIgnored private var started = false
@@ -187,10 +212,7 @@ final class AppModel {
         started = true
         observeSystemEvents()
         startNetworkMonitor()
-        Task {
-            await discoverProfilesIfNeeded()
-            refresh()   // 发现 profile 后先全量拉一次
-        }
+        refresh()
         for source in RefreshSource.allCases {
             scheduleTimer(for: source)
         }
@@ -201,10 +223,7 @@ final class AppModel {
         let t = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshSource(source) }
         }
-        // 允许系统批量合并定时器唤醒（降低 CPU 唤醒次数、省电）。
-        // 数据上游本就延迟 5–30 分钟，晚几十秒无影响。
         t.tolerance = max(15, seconds * 0.2)
-        // 用默认 mode（非 .common）：后台刷新无需在拖拽/滚动时抢跑。
         RunLoop.main.add(t, forMode: .default)
         timers[source] = t
     }
@@ -225,13 +244,11 @@ final class AppModel {
 
     private func observeSystemEvents() {
         let nc = NSWorkspace.shared.notificationCenter
-        // 系统休眠 / 显示器息屏 / 锁屏 → 暂停（不再轮询）
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.pause() }
             }
         }
-        // 唤醒 / 屏幕点亮 → 恢复，并立即补刷一次
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.resume() }
@@ -249,7 +266,7 @@ final class AppModel {
         guard paused else { return }
         paused = false
         for source in RefreshSource.allCases { scheduleTimer(for: source) }
-        if networkUp { refresh() }   // 唤醒后立即补刷，你看到的是新的
+        if networkUp { refresh() }
     }
 
     // MARK: 网络监控
@@ -266,25 +283,25 @@ final class AppModel {
     private func setNetwork(up: Bool) {
         let was = networkUp
         networkUp = up
-        if up && !was && !paused { refresh() }   // 网络恢复 → 补刷一次
+        if up && !was && !paused { refresh() }
     }
 
     // MARK: 刷新入口
 
-    /// 全量刷新（手动“刷新”按钮 / 启动 / 唤醒 / 网络恢复）。
+    /// 全量刷新所有账号所有启用的服务。
     func refresh() {
         refreshSource(.agentPlan)
         refreshSource(.speech)
     }
 
-    /// 打开面板时调用：只刷“已过期”的源（距上次成功超过间隔），没过期则用缓存不发请求。
+    /// 打开面板时：只刷已过期的源。
     func refreshIfStale() {
         guard networkUp else { return }
         let now = Date()
         for source in RefreshSource.allCases {
             let limit = TimeInterval(interval(for: source))
             if let last = lastSuccessAt[source], now.timeIntervalSince(last) < limit {
-                continue   // 还新鲜，不刷
+                continue
             }
             refreshSource(source)
         }
@@ -292,200 +309,213 @@ final class AppModel {
 
     @ObservationIgnored private var refreshing: Set<RefreshSource> = []
 
-    /// 刷新单个源（定时器回调 / 单独触发）。
+    /// 刷新某类服务（跨所有账号）。
     private func refreshSource(_ source: RefreshSource) {
         guard !refreshing.contains(source) else { return }
-        guard networkUp else { return }   // 断网不发无用请求
+        guard networkUp else { return }
         refreshing.insert(source)
         isRefreshing = !refreshing.isEmpty
         Task {
-            let ok: Bool
-            switch source {
-            case .agentPlan: ok = await refreshAgentPlan()
-            case .speech: ok = await refreshSpeech()
+            var anyOK = false
+            for config in accountConfigs {
+                switch source {
+                case .agentPlan where config.enableAgentPlan:
+                    if await fetchAgentPlan(for: config) { anyOK = true }
+                case .speech where !config.speechApps.isEmpty:
+                    if await fetchSpeech(for: config) { anyOK = true }
+                default:
+                    break
+                }
             }
             let now = Date()
             lastRefreshAt = now
-            if ok { lastSuccessAt[source] = now }
+            if anyOK { lastSuccessAt[source] = now }
             refreshing.remove(source)
             isRefreshing = !refreshing.isEmpty
         }
     }
 
-    private func refreshAgentPlan() async -> Bool {
-        guard !arkPlanProfile.isEmpty else { return false }   // 未选 profile 则不拉
-        let provider = ArkPlanProvider(profile: arkPlanProfile)
-        let now = Date()
+    /// 刷新单个账号配置的全部启用服务（增删改后调用）。
+    private func refreshAccountConfig(_ config: AccountConfig) {
+        Task {
+            isRefreshing = true
+            if config.enableAgentPlan { _ = await fetchAgentPlan(for: config) }
+            if !config.speechApps.isEmpty { _ = await fetchSpeech(for: config) }
+            // 都没启用则移除展示账号
+            if !config.enableAgentPlan && config.speechApps.isEmpty {
+                accounts.removeAll { $0.id == config.id }
+            }
+            lastRefreshAt = Date()
+            isRefreshing = false
+        }
+    }
+
+    // MARK: 取数
+
+    /// 确保拿到该账号的完整账号 ID（用于命名尾号），只查一次。
+    private func ensureAccountID(_ config: AccountConfig, ak: String, sk: String) async {
+        guard accountFullID_[config.id] == nil else { return }
+        if let id = await VolcSigner.fetchAccountID(accessKeyID: ak, secretAccessKey: sk) {
+            accountFullID_[config.id] = id
+            // 回写配置持久化，下次启动免查
+            if let idx = accountConfigs.firstIndex(where: { $0.id == config.id }) {
+                accountConfigs[idx].accountFullID = id
+                AccountStore.save(accountConfigs)
+            }
+        }
+    }
+
+    private func fetchAgentPlan(for config: AccountConfig) async -> Bool {
+        let ak = AccountStore.accessKeyID(for: config.id)
+        let sk = AccountStore.secretAccessKey(for: config.id)
+        guard !ak.isEmpty, !sk.isEmpty else { return false }
+        await ensureAccountID(config, ak: ak, sk: sk)
+        let provider = AgentPlanProvider(accessKeyID: ak, secretAccessKey: sk)
         do {
             let plan = try await provider.fetch()
-            let service = Service(
-                id: "agent-plan",
-                title: "Agent Plan",
-                content: .agentPlan(plan),
-                status: .ok,
-                errorMessage: nil,
-                updatedAt: now
-            )
-            upsertAccount(id: arkPlanProfile,
-                          platform: platformName,
-                          defaultName: plan.userName?.trimmingCharacters(in: .whitespaces) ?? "",
-                          fullID: plan.accountID,
-                          service: service)
+            let service = Service(id: "agent-plan", title: "Agent Plan",
+                                  content: .agentPlan(plan), status: .ok,
+                                  errorMessage: nil, updatedAt: Date())
+            upsertService(config: config, service: service)
             return true
         } catch {
-            // 保留上一次有效值，仅标记 error。
-            markServiceError(accountID: arkPlanProfile, serviceID: "agent-plan",
-                             serviceTitle: "Agent Plan",
+            markServiceError(config: config, serviceID: "agent-plan",
+                             serviceTitle: "Agent Plan", agentPlan: true,
                              message: error.localizedDescription)
             return false
         }
     }
 
-    // MARK: 账号B · 语音服务
-
-    /// 语音账号自动获取到的信息（用于命名）。
-    @ObservationIgnored private var speechFullID: String?
-
-    /// 清除语音账号（用户在设置里清除密钥时）。
-    func clearSpeechAccount() {
-        accounts.removeAll { $0.id == speechAccountID }
-        speechAccountIDFetched = false
-        speechFullID = nil
-    }
-
-    private func refreshSpeech() async -> Bool {
-        // 未配置 AK/SK 则不尝试（避免报错刷屏）。
-        guard SpeechCredentials.isConfigured else { return false }
-        let ak = SpeechCredentials.accessKeyID
-        let sk = SpeechCredentials.secretAccessKey
-        let appID = Int(SpeechCredentials.appID) ?? 0
+    private func fetchSpeech(for config: AccountConfig) async -> Bool {
+        let ak = AccountStore.accessKeyID(for: config.id)
+        let sk = AccountStore.secretAccessKey(for: config.id)
+        guard !ak.isEmpty, !sk.isEmpty, !config.speechApps.isEmpty else { return false }
+        await ensureAccountID(config, ak: ak, sk: sk)
         let now = Date()
-
-        let provider = SpeechProvider(accessKeyID: ak, secretAccessKey: sk, appID: appID)
-        do {
-            // 首次拉取账号 ID，用于命名（与 Agent Plan 对齐）。
-            if !speechAccountIDFetched {
-                speechFullID = await provider.fetchAccountID()
-                speechAccountIDFetched = true
+        var services: [Service] = []
+        var anyOK = false
+        var lastError: String?
+        for app in config.speechApps {
+            guard let appID = Int(app.appID), appID > 0 else { continue }
+            let provider = SpeechProvider(accessKeyID: ak, secretAccessKey: sk, appID: appID)
+            do {
+                let packs = try await provider.fetch()
+                anyOK = true
+                for p in packs {
+                    let pack = SpeechPack(title: p.title, purchased: p.purchased, used: p.used,
+                                          unit: p.unit, purchasedValue: p.purchasedValue,
+                                          usedValue: p.usedValue, expires: p.expires, type: p.type)
+                    // 多应用，或用户自定义了备注时，在标题前加应用标识，避免重名
+                    let showPrefix = config.speechApps.count > 1 || !app.label.trimmingCharacters(in: .whitespaces).isEmpty
+                    let prefix = showPrefix ? "\(app.displayLabel) · " : ""
+                    services.append(Service(
+                        id: "speech-\(app.id)-\(p.title)",
+                        title: "\(prefix)\(p.title)",
+                        content: .speech(pack), status: .ok, errorMessage: nil, updatedAt: now))
+                }
+            } catch {
+                lastError = error.localizedDescription
             }
-            let packs = try await provider.fetch()
-            // 层级与 Agent Plan 对齐：每个 pack 当作一个独立服务挂在语音账号下。
-            // 成功时重建该账号的服务列表（清掉旧的 error 占位服务）。
-            let services = packs.map { p -> Service in
-                let pack = SpeechPack(title: p.title, purchased: p.purchased, used: p.used,
-                                      unit: p.unit, purchasedValue: p.purchasedValue,
-                                      usedValue: p.usedValue, expires: p.expires, type: p.type)
-                return Service(
-                    id: "speech-\(p.title)", title: p.title,
-                    content: .speech(pack), status: .ok, errorMessage: nil, updatedAt: now
-                )
-            }
-            if services.isEmpty {
-                // 配了密钥但没查到资源包：不报错，只移除该账号。
-                accounts.removeAll { $0.id == speechAccountID }
-            } else {
-                setAccountServices(id: speechAccountID, platform: platformName,
-                                   defaultName: "语音账号", fullID: speechFullID,
-                                   services: services)
-            }
+        }
+        if !services.isEmpty {
+            setSpeechServices(config: config, services: services)
             return true
-        } catch {
-            markSpeechError(message: error.localizedDescription)
-            return false
         }
-    }
-
-    private func markSpeechError(message: String) {
-        // 给已有的语音服务都标记 error；若从未成功过则放一个提示卡。
-        if let ai = accounts.firstIndex(where: { $0.id == speechAccountID }),
-           !accounts[ai].services.isEmpty {
-            for si in accounts[ai].services.indices {
-                accounts[ai].services[si].status = .error
-                accounts[ai].services[si].errorMessage = message
-            }
+        // 全部应用都没拿到：有错就标错，否则移除
+        if let err = lastError {
+            markSpeechError(config: config, message: err)
         } else {
-            let placeholder = SpeechPack(title: "语音服务", purchased: "", used: "", unit: "",
-                                         purchasedValue: 0, usedValue: 0, expires: "", type: "")
-            let service = Service(
-                id: "speech-placeholder", title: "语音服务",
-                content: .speech(placeholder),
-                status: .error, errorMessage: message, updatedAt: nil
-            )
-            upsertAccount(id: speechAccountID, platform: platformName,
-                          defaultName: "语音账号", fullID: speechFullID, service: service)
+            removeSpeechServices(config: config)
         }
-    }
-
-    // MARK: 账号别名
-
-    /// 设置账号别名（nil / 空 = 恢复默认用户名）。
-    func setAlias(_ alias: String?, for accountID: String) {
-        AppSettings.setAlias(alias, for: accountID)
-        if let ai = accounts.firstIndex(where: { $0.id == accountID }) {
-            accounts[ai].alias = (alias?.isEmpty == false) ? alias : nil
-        }
+        return anyOK
     }
 
     // MARK: 账号/服务写入
 
-    /// 构造账号元数据（平台/默认名/ID 尾号/完整 ID/别名）并写入字段。
-    private func applyMeta(_ i: Int, platform: String, defaultName: String, fullID: String?) {
-        accounts[i].platform = platform
-        accounts[i].defaultName = defaultName
-        accounts[i].fullID = fullID
-        accounts[i].idTail = fullID.map { String($0.suffix(4)) }
-        accounts[i].alias = AppSettings.alias(for: accounts[i].id)
+    private func makeAccount(config: AccountConfig, services: [Service]) -> Account {
+        let full = accountFullID_[config.id]
+        return Account(id: config.id, platform: config.platform.displayName, defaultName: "",
+                       idTail: full.map { String($0.suffix(4)) }, fullID: full,
+                       alias: config.alias.isEmpty ? nil : config.alias, services: services)
     }
 
-    private func makeAccount(id: String, platform: String, defaultName: String,
-                             fullID: String?, services: [Service]) -> Account {
-        Account(id: id, platform: platform, defaultName: defaultName,
-                idTail: fullID.map { String($0.suffix(4)) }, fullID: fullID,
-                alias: AppSettings.alias(for: id), services: services)
+    private func applyMeta(_ i: Int, config: AccountConfig) {
+        let full = accountFullID_[config.id]
+        accounts[i].platform = config.platform.displayName
+        accounts[i].fullID = full
+        accounts[i].idTail = full.map { String($0.suffix(4)) }
+        accounts[i].alias = config.alias.isEmpty ? nil : config.alias
     }
 
-    /// 整个替换一个账号的服务列表（用于刷新成功时重建，清掉旧残留）。
-    private func setAccountServices(id: String, platform: String, defaultName: String,
-                                    fullID: String?, services: [Service]) {
-        if let ai = accounts.firstIndex(where: { $0.id == id }) {
-            accounts[ai].services = services
-            applyMeta(ai, platform: platform, defaultName: defaultName, fullID: fullID)
-        } else {
-            accounts.append(makeAccount(id: id, platform: platform, defaultName: defaultName,
-                                        fullID: fullID, services: services))
-        }
-    }
-
-    private func upsertAccount(id: String, platform: String, defaultName: String,
-                              fullID: String?, service: Service) {
-        if let ai = accounts.firstIndex(where: { $0.id == id }) {
+    /// 插入/更新单个服务（Agent Plan）。
+    private func upsertService(config: AccountConfig, service: Service) {
+        if let ai = accounts.firstIndex(where: { $0.id == config.id }) {
             if let si = accounts[ai].services.firstIndex(where: { $0.id == service.id }) {
                 accounts[ai].services[si] = service
             } else {
                 accounts[ai].services.append(service)
             }
-            applyMeta(ai, platform: platform, defaultName: defaultName, fullID: fullID)
+            applyMeta(ai, config: config)
         } else {
-            accounts.append(makeAccount(id: id, platform: platform, defaultName: defaultName,
-                                        fullID: fullID, services: [service]))
+            accounts.append(makeAccount(config: config, services: [service]))
+        }
+        sortServices(accountID: config.id)
+    }
+
+    /// 整体替换某账号的语音服务（保留 Agent Plan 服务）。
+    private func setSpeechServices(config: AccountConfig, services: [Service]) {
+        if let ai = accounts.firstIndex(where: { $0.id == config.id }) {
+            accounts[ai].services.removeAll { $0.id.hasPrefix("speech-") }
+            accounts[ai].services.append(contentsOf: services)
+            applyMeta(ai, config: config)
+            sortServices(accountID: config.id)
+        } else {
+            accounts.append(makeAccount(config: config, services: services))
         }
     }
 
-    private func markServiceError(accountID: String, serviceID: String,
-                                  serviceTitle: String, message: String) {
-        if let ai = accounts.firstIndex(where: { $0.id == accountID }),
+    private func removeSpeechServices(config: AccountConfig) {
+        guard let ai = accounts.firstIndex(where: { $0.id == config.id }) else { return }
+        accounts[ai].services.removeAll { $0.id.hasPrefix("speech-") }
+        if accounts[ai].services.isEmpty { accounts.remove(at: ai) }
+    }
+
+    /// 保证服务顺序稳定：Agent Plan 在前，语音在后。
+    private func sortServices(accountID: String) {
+        guard let ai = accounts.firstIndex(where: { $0.id == accountID }) else { return }
+        accounts[ai].services.sort { a, b in
+            func rank(_ id: String) -> Int { id == "agent-plan" ? 0 : 1 }
+            return rank(a.id) < rank(b.id)
+        }
+    }
+
+    private func markServiceError(config: AccountConfig, serviceID: String,
+                                  serviceTitle: String, agentPlan: Bool, message: String) {
+        if let ai = accounts.firstIndex(where: { $0.id == config.id }),
            let si = accounts[ai].services.firstIndex(where: { $0.id == serviceID }) {
             accounts[ai].services[si].status = .error
             accounts[ai].services[si].errorMessage = message
         } else {
-            // 从未成功过：放一个空壳错误服务，便于面板提示。
-            let service = Service(
-                id: serviceID, title: serviceTitle,
-                content: .agentPlan(AgentPlan(tier: "", edition: "", unit: "AFP", periods: [])),
-                status: .error, errorMessage: message, updatedAt: nil
-            )
-            upsertAccount(id: accountID, platform: platformName, defaultName: "",
-                          fullID: nil, service: service)
+            let content: ServiceContent = agentPlan
+                ? .agentPlan(AgentPlan(tier: "", edition: "", unit: "AFP", periods: []))
+                : .speech(SpeechPack(title: serviceTitle, purchased: "", used: "", unit: "",
+                                     purchasedValue: 0, usedValue: 0, expires: "", type: ""))
+            let service = Service(id: serviceID, title: serviceTitle, content: content,
+                                  status: .error, errorMessage: message, updatedAt: nil)
+            upsertService(config: config, service: service)
+        }
+    }
+
+    private func markSpeechError(config: AccountConfig, message: String) {
+        if let ai = accounts.firstIndex(where: { $0.id == config.id }),
+           accounts[ai].services.contains(where: { $0.id.hasPrefix("speech-") }) {
+            for si in accounts[ai].services.indices where accounts[ai].services[si].id.hasPrefix("speech-") {
+                accounts[ai].services[si].status = .error
+                accounts[ai].services[si].errorMessage = message
+            }
+        } else {
+            markServiceError(config: config, serviceID: "speech-placeholder",
+                             serviceTitle: "语音服务", agentPlan: false, message: message)
         }
     }
 }
