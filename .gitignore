@@ -16,3 +16,10 @@ capture.json
 
 # 控制台截图（含账号/AppID/密钥等敏感信息，不入公开仓库）
 pics/
+
+# 临时验证用凭证（永不入库）
+test-creds.env
+/tmp/afp-test*
+
+# 打包分发临时产物
+*.zip
