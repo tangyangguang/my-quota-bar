@@ -55,7 +55,8 @@
 | 项 | 选择 |
 |----|------|
 | 语言 / UI | Swift + SwiftUI `MenuBarExtra`（`.menuBarExtraStyle(.window)`），参考 codex-quota-menubar |
-| 构建 | Swift Package Manager + `build-app.sh`，ad-hoc 本地签名（`codesign --sign -`），无需 Apple Developer 账号 |
+| 构建 | Swift Package Manager + `build-app.sh`，编译 universal（arm64 + x86_64），ad-hoc 本地签名（`codesign --sign -`），无需 Apple Developer 账号 |
+| 分发 | 直接把 `outputs/My Quota Bar.app` 发给别人。因 ad-hoc 签名未公证，对方第一次打开会被 Gatekeeper 拦；需 `xattr -cr "路径/My Quota Bar.app"` 清除 quarantine 后双击即可（已实测有效）。README 有完整说明。 |
 | 定时刷新 | Timer 定时刷新；刷新中不重复发起；出错保留上一次有效值 |
 | 刷新间隔 | 5 分钟（300s）。因 arkcli 数据本身有 5–30 分钟延迟，无需高频 |
 | 运行形态 | `LSUIElement=true`，无 Dock 图标，仅菜单栏 |

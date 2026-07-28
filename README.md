@@ -18,23 +18,43 @@
   - 数据来源：火山公开 OpenAPI `ResourcePacksStatus`，用账号级 AK/SK 签名调用
   - 需在设置里填入 AK/SK + 应用 AppID（存 macOS 钥匙串）
 
-## 安装 & 配置（给第一次用的人）
+## 把做好的 App 发给朋友用（直接用，不用自己构建）
+
+你只需把 `outputs/My Quota Bar.app` 这**一个文件夹**（.app 其实是个目录）发给朋友即可（AirDrop / 压缩包 / 网盘都行）。App 已编译为 universal，**Apple Silicon 和 Intel Mac 都能跑**。
+
+但因为是个人自编、没有苹果开发者证书公证，朋友第一次打开会被 macOS 拦（提示“无法验证开发者”或“已损坏”）。让朋友按下面任一方式放行（只需一次）：
+
+**方式 A（推荐，一条命令）**：把 App 放到「应用程序」或任意位置后，终端运行（路径改成实际位置）：
+```bash
+xattr -cr "/Applications/My Quota Bar.app"
+```
+然后正常双击打开即可。
+
+**方式 B（纯鼠标）**：右键点 App → “打开” → 弹窗里再点“打开”；若系统版本不给“打开”按钮，去「系统设置 → 隐私与安全性」最下方点“仍要打开”。
+
+> 这不是病毒，只是苹果对“未公证应用”的默认拦截。本应用纯本地运行、不上传任何数据。
+
+打开后的配置同下面「配置 Agent Plan / 语音服务」。**朋友要看 Agent Plan，需要他自己的电脑装了 arkcli 并登录；只想用语音服务则只需填 AK/SK/AppID，无需 arkcli。**
+
+## 自己从源码构建（开发者 / 想改代码）
 
 ### 0. 环境要求
 - macOS 14 及以上
 - 安装 Swift 6（装 Xcode 或 Command Line Tools 即可）
 - 如需看 Agent Plan：安装火山官方 `arkcli` 并登录（`brew ...` 或官方方式安装后运行 `arkcli` 登录）
 
-### 1. 构建 App
+### 1. 构建 App（universal，双架构）
 ```bash
 git clone https://github.com/tangyangguang/my-quota-bar.git
 cd my-quota-bar
 ./build-app.sh
 open "outputs/My Quota Bar.app"
 ```
-菜单栏会出现一个图标 + 一个数字。
+菜单栏会出现一个图标 + 一个数字。产物在 `outputs/My Quota Bar.app`，可直接发给别人（见上一节）。
 
-### 2. 配置 Agent Plan（用你自己的账号）
+### 2. 配置 Agent Plan / 语音服务
+
+**Agent Plan（用你自己的账号）**
 1. 先确保本机装了 arkcli 且已登录：终端运行 `arkcli profile list` 能看到你的 profile。
 2. 点菜单栏图标 → 「设置」→「密钥」Tab → 顶部「火山引擎 · Agent Plan」。
 3. 在下拉里**选择你自己的 profile**（类型是 `agent-plan` 的那个）。首次启动 App 会自动尝试选中第一个 agent-plan 类型的 profile，通常无需手动改。
@@ -42,7 +62,7 @@ open "outputs/My Quota Bar.app"
 
 > 换句话说：每个人指定的是「自己电脑上 arkcli 里的哪个 profile」，所以你朋友装了 App、用他自己的 arkcli 登录，选他自己的 profile 即可，互不影响。
 
-### 3. 配置语音服务（可选）
+### 3. 语音服务（可选）
 1. 在火山引擎控制台「访问控制」创建一对 **Access Key ID / Secret Access Key**。
 2. 找到语音应用的 **AppID**（豆包语音控制台里的应用 ID）。
 3. 「设置」→「密钥」Tab →「火山引擎 · 语音服务」，填入 AK / SK / AppID，点「保存并刷新」。

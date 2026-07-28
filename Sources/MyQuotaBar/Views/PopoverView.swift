@@ -77,7 +77,7 @@ struct PopoverView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
         }
-        .font(.caption)
+        .font(.system(size: 13))
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
     }
