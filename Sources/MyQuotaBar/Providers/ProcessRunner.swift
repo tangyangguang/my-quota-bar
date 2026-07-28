@@ -54,6 +54,7 @@ private final class RunOperation: @unchecked Sendable {
     private var finished = false
     private var keepAlive: RunOperation?
     private var process: Process?
+    private var timeoutItem: DispatchWorkItem?
 
     init(
         executable: String,
@@ -118,9 +119,11 @@ private final class RunOperation: @unchecked Sendable {
             return
         }
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+        let timeoutItem = DispatchWorkItem { [weak self] in
             self?.finish(.failure(QuotaError.commandFailed("请求超时")))
         }
+        self.timeoutItem = timeoutItem
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
     }
 
     private func finish(_ result: Result<ProcessRunner.Result, Error>) {
@@ -129,6 +132,8 @@ private final class RunOperation: @unchecked Sendable {
         finished = true
         lock.unlock()
 
+        timeoutItem?.cancel()   // 已完成则取消超时任务，不再白白占着
+        timeoutItem = nil
         if process?.isRunning == true { process?.terminate() }
         continuation.resume(with: result)
         keepAlive = nil

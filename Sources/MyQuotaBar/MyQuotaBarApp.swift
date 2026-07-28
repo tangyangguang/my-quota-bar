@@ -8,7 +8,7 @@ struct MyQuotaBarApp: App {
     var body: some Scene {
         MenuBarExtra {
             PopoverView(model: model)
-                .onAppear { model.refresh() }
+                .onAppear { model.refreshIfStale() }
         } label: {
             HStack(spacing: 2) {
                 Image(systemName: model.menuBarSymbol)

@@ -1,11 +1,14 @@
 import AppKit
 import Foundation
+import Network
 import Observation
 
 @MainActor
 @Observable
 final class AppModel {
-    private(set) var accounts: [Account] = []
+    private(set) var accounts: [Account] = [] {
+        didSet { rebuildMetrics() }
+    }
     private(set) var isRefreshing = false
     private(set) var lastRefreshAt: Date?
 
@@ -55,7 +58,10 @@ final class AppModel {
 
     /// 隐藏的服务 ID。隐藏后面板不显示、也不进菜单栏可选项。
     var hiddenServiceIDs: Set<String> = AppSettings.hiddenServiceIDs {
-        didSet { AppSettings.hiddenServiceIDs = hiddenServiceIDs }
+        didSet {
+            AppSettings.hiddenServiceIDs = hiddenServiceIDs
+            rebuildMetrics()
+        }
     }
 
     func isServiceVisible(accountID: String, serviceID: String) -> Bool {
@@ -108,8 +114,12 @@ final class AppModel {
 
     // MARK: 菜单栏文本
 
-    /// 所有可选指标（拍平）。设置面板用它列勾选项。
-    var availableMetrics: [MenuBarMetric] {
+    /// 所有可选指标（拍平）。缓存起来，仅在账号/可见性变化时重建，
+    /// 避免 menuBarText/currentMetric 每次渲染都遍历重算。
+    private(set) var availableMetrics: [MenuBarMetric] = []
+
+    /// 重建指标缓存（数据或隐藏集变化时调用）。
+    private func rebuildMetrics() {
         var metrics: [MenuBarMetric] = []
         for account in accounts {
             for service in account.services {
@@ -136,7 +146,7 @@ final class AppModel {
                 }
             }
         }
-        return metrics
+        availableMetrics = metrics
     }
 
     /// 当前应显示在菜单栏的指标（用户选中的；没选或失效则回退到第一个）。
@@ -161,13 +171,25 @@ final class AppModel {
         "\(account.id)/\(service.id)/\(sub)"
     }
 
-    // MARK: 刷新（每源独立定时器）
+    // MARK: 刷新调度（每源独立定时器 + 休眠/断网感知 + 懒刷新）
+
+    /// 各源最后一次“成功”刷新时间（用于懒刷新判断）。
+    @ObservationIgnored private var lastSuccessAt: [RefreshSource: Date] = [:]
+    /// 是否已暂停（休眠/锁屏/断网）。暂停时定时器不发请求。
+    @ObservationIgnored private var paused = false
+    /// 网络是否可用。
+    @ObservationIgnored private var networkUp = true
+    @ObservationIgnored private var netMonitor: NWPathMonitor?
+    @ObservationIgnored private var started = false
 
     func startAutomaticRefresh() {
-        guard timers.isEmpty else { return }
+        guard !started else { return }
+        started = true
+        observeSystemEvents()
+        startNetworkMonitor()
         Task {
             await discoverProfilesIfNeeded()
-            refresh()   // 发现 profile 后再全量拉一次
+            refresh()   // 发现 profile 后先全量拉一次
         }
         for source in RefreshSource.allCases {
             scheduleTimer(for: source)
@@ -175,10 +197,15 @@ final class AppModel {
     }
 
     private func scheduleTimer(for source: RefreshSource) {
-        let t = Timer(timeInterval: TimeInterval(interval(for: source)), repeats: true) { [weak self] _ in
+        let seconds = TimeInterval(interval(for: source))
+        let t = Timer(timeInterval: seconds, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshSource(source) }
         }
-        RunLoop.main.add(t, forMode: .common)
+        // 允许系统批量合并定时器唤醒（降低 CPU 唤醒次数、省电）。
+        // 数据上游本就延迟 5–30 分钟，晚几十秒无影响。
+        t.tolerance = max(15, seconds * 0.2)
+        // 用默认 mode（非 .common）：后台刷新无需在拖拽/滚动时抢跑。
+        RunLoop.main.add(t, forMode: .default)
         timers[source] = t
     }
 
@@ -189,10 +216,78 @@ final class AppModel {
         scheduleTimer(for: source)
     }
 
-    /// 全量刷新（手动“刷新”按钮 / 启动时）。
+    private func stopAllTimers() {
+        for (_, t) in timers { t.invalidate() }
+        timers.removeAll()
+    }
+
+    // MARK: 系统事件（休眠/唤醒/锁屏）
+
+    private func observeSystemEvents() {
+        let nc = NSWorkspace.shared.notificationCenter
+        // 系统休眠 / 显示器息屏 / 锁屏 → 暂停（不再轮询）
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.pause() }
+            }
+        }
+        // 唤醒 / 屏幕点亮 → 恢复，并立即补刷一次
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resume() }
+            }
+        }
+    }
+
+    private func pause() {
+        guard !paused else { return }
+        paused = true
+        stopAllTimers()
+    }
+
+    private func resume() {
+        guard paused else { return }
+        paused = false
+        for source in RefreshSource.allCases { scheduleTimer(for: source) }
+        if networkUp { refresh() }   // 唤醒后立即补刷，你看到的是新的
+    }
+
+    // MARK: 网络监控
+
+    private func startNetworkMonitor() {
+        let monitor = NWPathMonitor()
+        netMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in self?.setNetwork(up: path.status == .satisfied) }
+        }
+        monitor.start(queue: DispatchQueue(label: "net.monitor"))
+    }
+
+    private func setNetwork(up: Bool) {
+        let was = networkUp
+        networkUp = up
+        if up && !was && !paused { refresh() }   // 网络恢复 → 补刷一次
+    }
+
+    // MARK: 刷新入口
+
+    /// 全量刷新（手动“刷新”按钮 / 启动 / 唤醒 / 网络恢复）。
     func refresh() {
         refreshSource(.agentPlan)
         refreshSource(.speech)
+    }
+
+    /// 打开面板时调用：只刷“已过期”的源（距上次成功超过间隔），没过期则用缓存不发请求。
+    func refreshIfStale() {
+        guard networkUp else { return }
+        let now = Date()
+        for source in RefreshSource.allCases {
+            let limit = TimeInterval(interval(for: source))
+            if let last = lastSuccessAt[source], now.timeIntervalSince(last) < limit {
+                continue   // 还新鲜，不刷
+            }
+            refreshSource(source)
+        }
     }
 
     @ObservationIgnored private var refreshing: Set<RefreshSource> = []
@@ -200,21 +295,25 @@ final class AppModel {
     /// 刷新单个源（定时器回调 / 单独触发）。
     private func refreshSource(_ source: RefreshSource) {
         guard !refreshing.contains(source) else { return }
+        guard networkUp else { return }   // 断网不发无用请求
         refreshing.insert(source)
         isRefreshing = !refreshing.isEmpty
         Task {
+            let ok: Bool
             switch source {
-            case .agentPlan: await refreshAgentPlan()
-            case .speech: await refreshSpeech()
+            case .agentPlan: ok = await refreshAgentPlan()
+            case .speech: ok = await refreshSpeech()
             }
-            lastRefreshAt = Date()
+            let now = Date()
+            lastRefreshAt = now
+            if ok { lastSuccessAt[source] = now }
             refreshing.remove(source)
             isRefreshing = !refreshing.isEmpty
         }
     }
 
-    private func refreshAgentPlan() async {
-        guard !arkPlanProfile.isEmpty else { return }   // 未选 profile 则不拉
+    private func refreshAgentPlan() async -> Bool {
+        guard !arkPlanProfile.isEmpty else { return false }   // 未选 profile 则不拉
         let provider = ArkPlanProvider(profile: arkPlanProfile)
         let now = Date()
         do {
@@ -232,11 +331,13 @@ final class AppModel {
                           defaultName: plan.userName?.trimmingCharacters(in: .whitespaces) ?? "",
                           fullID: plan.accountID,
                           service: service)
+            return true
         } catch {
             // 保留上一次有效值，仅标记 error。
             markServiceError(accountID: arkPlanProfile, serviceID: "agent-plan",
                              serviceTitle: "Agent Plan",
                              message: error.localizedDescription)
+            return false
         }
     }
 
@@ -252,9 +353,9 @@ final class AppModel {
         speechFullID = nil
     }
 
-    private func refreshSpeech() async {
+    private func refreshSpeech() async -> Bool {
         // 未配置 AK/SK 则不尝试（避免报错刷屏）。
-        guard SpeechCredentials.isConfigured else { return }
+        guard SpeechCredentials.isConfigured else { return false }
         let ak = SpeechCredentials.accessKeyID
         let sk = SpeechCredentials.secretAccessKey
         let appID = Int(SpeechCredentials.appID) ?? 0
@@ -287,8 +388,10 @@ final class AppModel {
                                    defaultName: "语音账号", fullID: speechFullID,
                                    services: services)
             }
+            return true
         } catch {
             markSpeechError(message: error.localizedDescription)
+            return false
         }
     }
 
