@@ -6,23 +6,34 @@ import Security
 enum Keychain {
     private static let service = "local.my.quota-bar"
 
-    static func set(_ value: String, for key: String) {
-        let account = key
-        let data = Data(value.utf8)
+    /// 原地更新已有凭证；不存在时才新增。绝不先删旧值，避免新增失败导致凭证丢失。
+    static func set(_ value: String, for key: String) throws {
+        guard !value.isEmpty else {
+            try delete(key)
+            return
+        }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: key
         ]
-        SecItemDelete(query as CFDictionary)
-
-        guard !value.isEmpty else { return }  // 空值等于清除
+        let attributes: [String: Any] = [
+            kSecValueData as String: Data(value.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw PersistenceError.keychain(operation: "更新", status: updateStatus)
+        }
 
         var add = query
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        for (key, value) in attributes { add[key] = value }
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw PersistenceError.keychain(operation: "保存", status: addStatus)
+        }
     }
 
     static func get(_ key: String) -> String? {
@@ -39,13 +50,34 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func delete(_ key: String) {
+    static func delete(_ key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw PersistenceError.keychain(operation: "删除", status: status)
+        }
+    }
+}
+
+enum PersistenceError: LocalizedError {
+    case keychain(operation: String, status: OSStatus)
+    case encodeConfiguration(String)
+    case configurationLocked
+
+    var errorDescription: String? {
+        switch self {
+        case .keychain(let operation, let status):
+            let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+            return "钥匙串\(operation)失败：\(message)"
+        case .encodeConfiguration(let message):
+            return "账号配置保存失败：\(message)"
+        case .configurationLocked:
+            return "账号配置已锁定保护：原配置无法读取，当前操作不会覆盖原始数据。"
+        }
     }
 }
 
@@ -89,21 +121,24 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
     var alias: String         // 用户自定义别名（可空）
     var accountFullID: String?// 测试连接后拿到的账号 ID（持久化，用于命名尾号）
     var enableAgentPlan: Bool // 是否获取/展示 Agent Plan（仅火山）
+    var enableSpeech: Bool    // 是否获取/展示语音服务；关闭时保留 AppID 配置
     var speechApps: [SpeechApp] // 语音应用列表（0..10，仅火山）
 
     init(id: String = UUID().uuidString, platform: Platform = .volcengine,
          alias: String = "", accountFullID: String? = nil,
-         enableAgentPlan: Bool = false, speechApps: [SpeechApp] = []) {
+         enableAgentPlan: Bool = false, enableSpeech: Bool? = nil,
+         speechApps: [SpeechApp] = []) {
         self.id = id
         self.platform = platform
         self.alias = alias
         self.accountFullID = accountFullID
         self.enableAgentPlan = enableAgentPlan
+        self.enableSpeech = enableSpeech ?? !speechApps.isEmpty
         self.speechApps = speechApps
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, platform, alias, accountFullID, enableAgentPlan, speechApps
+        case id, platform, alias, accountFullID, enableAgentPlan, enableSpeech, speechApps
     }
 
     init(from decoder: Decoder) throws {
@@ -115,6 +150,8 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
         accountFullID = try? c.decodeIfPresent(String.self, forKey: .accountFullID)
         enableAgentPlan = (try? c.decodeIfPresent(Bool.self, forKey: .enableAgentPlan)) ?? false
         speechApps = (try? c.decodeIfPresent([SpeechApp].self, forKey: .speechApps)) ?? []
+        // 旧配置没有开关时，有应用即视为已启用，保持升级前行为。
+        enableSpeech = (try? c.decodeIfPresent(Bool.self, forKey: .enableSpeech)) ?? !speechApps.isEmpty
     }
 
     func encode(to encoder: Encoder) throws {
@@ -124,6 +161,7 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
         try c.encode(alias, forKey: .alias)
         try c.encodeIfPresent(accountFullID, forKey: .accountFullID)
         try c.encode(enableAgentPlan, forKey: .enableAgentPlan)
+        try c.encode(enableSpeech, forKey: .enableSpeech)
         try c.encode(speechApps, forKey: .speechApps)
     }
 }
@@ -132,28 +170,68 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
 @MainActor
 enum AccountStore {
     private static let listKey = "accountConfigs"
+    private static let backupKey = "accountConfigs.backup"
+    private(set) static var lastLoadWarning: String?
+    private(set) static var writesLocked = false
 
+    /// 主配置损坏时自动回退到最近一次有效备份，不再静默伪装成“没有账号”。
     static func load() -> [AccountConfig] {
-        guard let data = UserDefaults.standard.data(forKey: listKey),
-              let list = try? JSONDecoder().decode([AccountConfig].self, from: data) else { return [] }
-        return list
+        lastLoadWarning = nil
+        writesLocked = false
+        let defaults = UserDefaults.standard
+        guard let primary = defaults.data(forKey: listKey) else { return [] }
+        do {
+            return try JSONDecoder().decode([AccountConfig].self, from: primary)
+        } catch {
+            if let backup = defaults.data(forKey: backupKey),
+               let recovered = try? JSONDecoder().decode([AccountConfig].self, from: backup) {
+                lastLoadWarning = "账号主配置损坏，已从最近备份恢复。请检查账号后重新保存。"
+                return recovered
+            }
+            lastLoadWarning = "账号配置无法读取，原始数据已保留；写入已锁定，避免覆盖。"
+            writesLocked = true
+            return []
+        }
     }
 
-    static func save(_ list: [AccountConfig]) {
-        if let data = try? JSONEncoder().encode(list) {
-            UserDefaults.standard.set(data, forKey: listKey)
+    /// 编码成功后才写入；覆盖前把当前有效配置留作回滚备份。
+    static func save(_ list: [AccountConfig]) throws {
+        guard !writesLocked else { throw PersistenceError.configurationLocked }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(list)
+        } catch {
+            throw PersistenceError.encodeConfiguration(error.localizedDescription)
         }
+        let defaults = UserDefaults.standard
+        if let current = defaults.data(forKey: listKey),
+           (try? JSONDecoder().decode([AccountConfig].self, from: current)) != nil {
+            defaults.set(current, forKey: backupKey)
+        }
+        defaults.set(data, forKey: listKey)
+        lastLoadWarning = nil
     }
 
     // AK/SK 存钥匙串，键按账号 ID 区分。
     static func accessKeyID(for id: String) -> String { Keychain.get("ak_\(id)") ?? "" }
     static func secretAccessKey(for id: String) -> String { Keychain.get("sk_\(id)") ?? "" }
-    static func setCredentials(ak: String, sk: String, for id: String) {
-        Keychain.set(ak, for: "ak_\(id)")
-        Keychain.set(sk, for: "sk_\(id)")
+    static func setCredentials(ak: String, sk: String, for id: String) throws {
+        let akKey = "ak_\(id)"
+        let skKey = "sk_\(id)"
+        let oldAK = Keychain.get(akKey) ?? ""
+        let oldSK = Keychain.get(skKey) ?? ""
+        try Keychain.set(ak, for: akKey)
+        do {
+            try Keychain.set(sk, for: skKey)
+        } catch {
+            // 两项视作一组：第二项失败时尽力恢复第一项旧值。
+            try? Keychain.set(oldAK, for: akKey)
+            try? Keychain.set(oldSK, for: skKey)
+            throw error
+        }
     }
-    static func deleteCredentials(for id: String) {
-        Keychain.delete("ak_\(id)")
-        Keychain.delete("sk_\(id)")
+    static func deleteCredentials(for id: String) throws {
+        try Keychain.delete("ak_\(id)")
+        try Keychain.delete("sk_\(id)")
     }
 }

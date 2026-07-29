@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// 独立设置窗口：账号管理（增删改）+ 显示设置。
@@ -22,9 +23,39 @@ struct AccountsTab: View {
     @State private var selectedID: String?
     @State private var addingNew = false
     @State private var deleteTarget: AccountConfig?
+    @State private var operationError: String?
+    @State private var detailDirty = false
+    @State private var pendingSelectionID: String?
+    @State private var showUnsavedPrompt = false
+    @State private var saveRequest = 0
 
     private var selected: AccountConfig? {
         model.accountConfigs.first { $0.id == selectedID }
+    }
+
+    private var groupedAccounts: [(platform: Platform, accounts: [AccountConfig])] {
+        var platforms: [Platform] = []
+        for config in model.accountConfigs where !platforms.contains(config.platform) {
+            platforms.append(config.platform)
+        }
+        return platforms.map { platform in
+            (platform, model.accountConfigs.filter { $0.platform == platform })
+        }
+    }
+
+    private var selection: Binding<String?> {
+        Binding(
+            get: { selectedID },
+            set: { newValue in
+                guard newValue != selectedID else { return }
+                if detailDirty {
+                    pendingSelectionID = newValue
+                    showUnsavedPrompt = true
+                } else {
+                    selectedID = newValue
+                }
+            }
+        )
     }
 
     var body: some View {
@@ -36,6 +67,18 @@ struct AccountsTab: View {
         .sheet(isPresented: $addingNew) {
             AddAccountSheet(model: model) { newID in selectedID = newID }
         }
+        .confirmationDialog("有尚未保存的修改", isPresented: $showUnsavedPrompt,
+                            titleVisibility: .visible) {
+            Button("保存并切换") { saveRequest += 1 }
+            Button("不保存并切换", role: .destructive) {
+                detailDirty = false
+                selectedID = pendingSelectionID
+                pendingSelectionID = nil
+            }
+            Button("取消", role: .cancel) { pendingSelectionID = nil }
+        } message: {
+            Text("当前账号的修改尚未保存。")
+        }
         .confirmationDialog(
             "确定删除该账号？",
             isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
@@ -43,13 +86,22 @@ struct AccountsTab: View {
             presenting: deleteTarget
         ) { target in
             Button("删除账号", role: .destructive) {
-                model.removeAccount(id: target.id)
-                if selectedID == target.id { selectedID = nil }
+                do {
+                    try model.removeAccount(id: target.id)
+                    if selectedID == target.id { selectedID = nil }
+                } catch {
+                    operationError = error.localizedDescription
+                }
                 deleteTarget = nil
             }
             Button("取消", role: .cancel) { deleteTarget = nil }
         } message: { target in
             Text("将从钥匙串删除该账号的密钥，并从面板移除「\(target.alias.isEmpty ? "未命名账号" : target.alias)」的所有服务。此操作不可撤销。")
+        }
+        .alert("操作失败", isPresented: errorBinding($operationError)) {
+            Button("好") { operationError = nil }
+        } message: {
+            Text(operationError ?? "未知错误")
         }
         .onAppear {
             if selectedID == nil { selectedID = model.accountConfigs.first?.id }
@@ -59,11 +111,22 @@ struct AccountsTab: View {
     // 左边栏：账号列表 + 底部 +/− 工具栏
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selectedID) {
-                ForEach(model.accountConfigs) { config in
-                    AccountRow(config: config).tag(config.id)
+            if let warning = model.configurationWarning ?? model.persistenceError {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                Divider()
+            }
+            List(selection: selection) {
+                ForEach(groupedAccounts, id: \.platform) { group in
+                    Section(group.platform.displayName) {
+                        ForEach(group.accounts) { config in
+                            AccountRow(config: config).tag(config.id)
+                        }
+                        .onMove { model.moveAccounts(in: group.platform, from: $0, to: $1) }
+                    }
                 }
-                .onMove { model.moveAccounts(from: $0, to: $1) }
             }
             .listStyle(.sidebar)
 
@@ -86,8 +149,20 @@ struct AccountsTab: View {
 
                 Spacer()
                 if model.accountConfigs.count > 1 {
-                    Text("拖动可排序")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                    Menu {
+                        if let selected {
+                            let group = model.accountConfigs.filter { $0.platform == selected.platform }
+                            let index = group.firstIndex(where: { $0.id == selected.id }) ?? 0
+                            Button("上移") { moveSelectedAccount(offset: -1) }
+                                .disabled(index == 0)
+                            Button("下移") { moveSelectedAccount(offset: 1) }
+                                .disabled(index == group.count - 1)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down").frame(width: 24, height: 22)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("调整账号显示顺序")
                 }
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
@@ -95,12 +170,34 @@ struct AccountsTab: View {
         .frame(width: 190)
     }
 
+    private func moveSelectedAccount(offset: Int) {
+        guard let selected else { return }
+        let group = model.accountConfigs.filter { $0.platform == selected.platform }
+        guard let index = group.firstIndex(where: { $0.id == selected.id }) else { return }
+        let target = index + offset
+        guard group.indices.contains(target) else { return }
+        let destination = offset < 0 ? target : target + 1
+        model.moveAccounts(in: selected.platform, from: IndexSet(integer: index), to: destination)
+    }
+
     // 右侧详情：选中账号则显示编辑器，否则空态
     @ViewBuilder
     private var detail: some View {
         if let config = selected {
-            AccountDetailView(model: model, account: config)
-                .id(config.id)   // 换账号时重建，重新 load
+            AccountDetailView(
+                model: model,
+                account: config,
+                saveRequest: saveRequest,
+                onDirtyChange: { detailDirty = $0 },
+                onSaveSucceeded: {
+                    detailDirty = false
+                    if let pending = pendingSelectionID {
+                        pendingSelectionID = nil
+                        selectedID = pending
+                    }
+                }
+            )
+            .id(config.id)   // 换账号时重建，重新 load
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "person.crop.circle.badge.plus")
@@ -139,7 +236,7 @@ struct AccountRow: View {
     private var serviceSummary: String {
         var parts: [String] = []
         if config.enableAgentPlan { parts.append("Agent Plan") }
-        if !config.speechApps.isEmpty { parts.append("语音 ×\(config.speechApps.count)") }
+        if config.enableSpeech { parts.append("语音 ×\(config.speechApps.count)") }
         return parts.isEmpty ? "未配置服务" : parts.joined(separator: " · ")
     }
 }
@@ -158,6 +255,7 @@ struct AddAccountSheet: View {
     @State private var accountFullID: String?
     @State private var fetchedName: String?
     @State private var alias = ""
+    @State private var saveError: String?
 
     private var canSave: Bool {
         !ak.trimmingCharacters(in: .whitespaces).isEmpty
@@ -171,7 +269,9 @@ struct AddAccountSheet: View {
             VStack(alignment: .leading, spacing: 14) {
                 GroupBox {
                     Picker("平台", selection: $platform) {
-                        ForEach(Platform.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                        ForEach(PlatformRegistry.supportedPlatforms, id: \.self) {
+                            Text($0.displayName).tag($0)
+                        }
                     }
                     .pickerStyle(.menu)
                 } label: {
@@ -232,6 +332,11 @@ struct AddAccountSheet: View {
             .padding(12)
         }
         .frame(width: 460, height: 400)
+        .alert("添加账号失败", isPresented: errorBinding($saveError)) {
+            Button("好") { saveError = nil }
+        } message: {
+            Text(saveError ?? "未知错误")
+        }
     }
 
     @ViewBuilder
@@ -255,13 +360,13 @@ struct AddAccountSheet: View {
 
     private func testCredentials() async {
         credState = .testing
-        let r = await model.testCredentials(ak: ak, sk: sk)
+        let r = await model.testCredentials(platform: platform, ak: ak, sk: sk)
         if r.ok, let identity = r.identity {
             accountFullID = identity.accountID
-            fetchedName = identity.friendlyName
+            fetchedName = identity.suggestedAccountName
             credState = .success(r.message)
             if alias.trimmingCharacters(in: .whitespaces).isEmpty {
-                alias = identity.friendlyName
+                alias = identity.suggestedAccountName
             }
         } else {
             credState = .failure(r.message)
@@ -269,23 +374,37 @@ struct AddAccountSheet: View {
     }
 
     private func save() {
-        let newID = model.addAccount(
-            platform: platform,
-            alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
-            ak: ak.trimmingCharacters(in: .whitespaces),
-            sk: sk.trimmingCharacters(in: .whitespaces),
-            accountFullID: accountFullID,
-            enableAgentPlan: false, speechApps: [])
-        onAdded(newID)
-        dismiss()
+        do {
+            let newID = try model.addAccount(
+                platform: platform,
+                alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+                ak: ak.trimmingCharacters(in: .whitespaces),
+                sk: sk.trimmingCharacters(in: .whitespaces),
+                accountFullID: accountFullID,
+                enableAgentPlan: false, speechApps: [])
+            onAdded(newID)
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
+        }
     }
 }
 
 // MARK: - 账号详情（右侧）：上「账号信息」+ 下「服务」，两区块独立
 
 struct AccountDetailView: View {
+    enum Page: String, CaseIterable {
+        case account = "账号信息"
+        case services = "服务管理"
+    }
+
     @Bindable var model: AppModel
     let account: AccountConfig
+    let saveRequest: Int
+    let onDirtyChange: (Bool) -> Void
+    let onSaveSucceeded: () -> Void
+
+    @State private var page: Page = .account
 
     // 账号信息
     @State private var alias = ""
@@ -297,18 +416,44 @@ struct AccountDetailView: View {
     // 服务
     @State private var enableAgentPlan = false
     @State private var agentTestState = TestState.idle
+    @State private var enableSpeech = false
     @State private var speechApps: [SpeechAppDraft] = []
 
     @State private var loaded = false
     @State private var savedTick = false   // 保存后短暂显示“已保存”
+    @State private var saveError: String?
 
     var body: some View {
         VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.alias.isEmpty ? "未命名账号" : account.alias)
+                            .font(.headline)
+                        Text(account.platform.displayName)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("", selection: $page) {
+                        ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 230)
+                }
+            }
+            .padding(.horizontal, 20).padding(.vertical, 12)
+
+            Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    accountInfoSection
-                    Divider()
-                    servicesSection
+                Group {
+                    if !account.platform.isSupported {
+                        unsupportedPlatformView
+                    } else if page == .account {
+                        accountInfoSection
+                    } else {
+                        servicesSection
+                    }
                 }
                 .padding(20)
             }
@@ -321,14 +466,35 @@ struct AccountDetailView: View {
                         .transition(.opacity)
                 }
                 Spacer()
-                Button("保存修改") { save() }
+                Button(page == .account ? "保存账号信息" : "保存服务配置") {
+                    if save() { onSaveSucceeded() }
+                }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!dirty)
+                    .disabled(!dirty || !account.platform.isSupported)
             }
             .padding(12)
         }
+        .background(WindowCloseGuard(hasUnsavedChanges: dirty, save: save))
         .onAppear(perform: load)
+        .onChange(of: dirty) { _, value in onDirtyChange(value) }
+        .onChange(of: saveRequest) {
+            if save() { onSaveSucceeded() }
+        }
+        .alert("保存失败", isPresented: errorBinding($saveError)) {
+            Button("好") { saveError = nil }
+        } message: {
+            Text(saveError ?? "未知错误")
+        }
+    }
+
+    private var unsupportedPlatformView: some View {
+        ContentUnavailableView(
+            "当前版本暂不支持此平台",
+            systemImage: "questionmark.app.dashed",
+            description: Text("平台标识 \(account.platform.rawValue) 已原样保留，不会按火山引擎请求或改写。")
+        )
+        .frame(maxWidth: .infinity, minHeight: 300)
     }
 
     // MARK: 账号信息
@@ -414,24 +580,39 @@ struct AccountDetailView: View {
             }
             .modifier(ServiceCardStyle())
 
-            // 语音应用（每个一张圆角卡片）
-            ForEach($speechApps) { $app in
-                SpeechAppRow(app: $app, model: model, ak: currentAK, sk: currentSK,
-                             onDelete: { speechApps.removeAll { $0.id == app.id } })
-            }
+            // 语音服务与 Agent Plan 同级；AppID 是它内部的服务实例。
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "waveform.circle.fill").foregroundStyle(.secondary)
+                    Text("语音服务")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Toggle("", isOn: $enableSpeech).labelsHidden()
+                }
+                Text("ASR / TTS 资源包；每个 AppID 独立统计额度")
+                    .font(.caption2).foregroundStyle(.secondary)
 
-            Button {
-                if speechApps.count < 10 { speechApps.append(SpeechAppDraft()) }
-            } label: {
-                Label("添加语音应用", systemImage: "plus")
+                if enableSpeech {
+                    if speechApps.isEmpty {
+                        Text("尚未配置应用，请添加至少一个 AppID。")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
+                    ForEach($speechApps) { $app in
+                        SpeechAppRow(app: $app, model: model, ak: currentAK, sk: currentSK,
+                                     onDelete: { speechApps.removeAll { $0.id == app.id } })
+                    }
+                    Button {
+                        if speechApps.count < 10 { speechApps.append(SpeechAppDraft()) }
+                    } label: {
+                        Label("添加语音应用", systemImage: "plus")
+                    }
+                    .disabled(speechApps.count >= 10)
+                    if speechApps.count >= 10 {
+                        Text("最多 10 个语音应用").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
             }
-            .disabled(speechApps.count >= 10)
-            if speechApps.count >= 10 {
-                Text("最多 10 个语音应用").font(.caption2).foregroundStyle(.tertiary)
-            } else if speechApps.isEmpty {
-                Text("语音服务（ASR / TTS）：每个应用独立统计额度，可添加多个。")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
+            .modifier(ServiceCardStyle())
         }
     }
 
@@ -445,6 +626,7 @@ struct AccountDetailView: View {
         if keysDirty { return true }
         if alias.trimmingCharacters(in: .whitespacesAndNewlines) != account.alias { return true }
         if enableAgentPlan != account.enableAgentPlan { return true }
+        if enableSpeech != account.enableSpeech { return true }
         let cur: [SpeechApp] = speechApps.compactMap { d in
             let id = d.appID.trimmingCharacters(in: .whitespaces)
             guard !id.isEmpty else { return nil }
@@ -474,7 +656,7 @@ struct AccountDetailView: View {
 
     private func testCredentials() async {
         credState = .testing
-        let r = await model.testCredentials(ak: ak, sk: sk)
+        let r = await model.testCredentials(platform: account.platform, ak: ak, sk: sk)
         credState = r.ok ? .success(r.message) : .failure(r.message)
     }
 
@@ -489,13 +671,16 @@ struct AccountDetailView: View {
         loaded = true
         alias = account.alias
         enableAgentPlan = account.enableAgentPlan
+        enableSpeech = account.enableSpeech
         speechApps = account.speechApps.map { SpeechAppDraft(id: $0.id, appID: $0.appID, label: $0.label) }
         let cred = model.credentials(for: account.id)
         ak = cred.ak; sk = cred.sk
         keysDirty = false
     }
 
-    private func save() {
+    @discardableResult
+    private func save() -> Bool {
+        guard dirty else { return true }
         let aliasT = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         let apps: [SpeechApp] = speechApps.compactMap { d in
             let id = d.appID.trimmingCharacters(in: .whitespaces)
@@ -504,14 +689,22 @@ struct AccountDetailView: View {
         }
         let newAK: String? = keysDirty ? ak.trimmingCharacters(in: .whitespaces) : nil
         let newSK: String? = keysDirty ? sk.trimmingCharacters(in: .whitespaces) : nil
-        model.updateAccount(id: account.id, alias: aliasT, ak: newAK, sk: newSK,
-                            accountFullID: account.accountFullID,
-                            enableAgentPlan: enableAgentPlan, speechApps: apps)
-        keysDirty = false
-        withAnimation { savedTick = true }
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await MainActor.run { withAnimation { savedTick = false } }
+        do {
+            try model.updateAccount(id: account.id, alias: aliasT, ak: newAK, sk: newSK,
+                                    accountFullID: account.accountFullID,
+                                    enableAgentPlan: enableAgentPlan,
+                                    enableSpeech: enableSpeech, speechApps: apps)
+            keysDirty = false
+            withAnimation { savedTick = true }
+            onDirtyChange(false)
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await MainActor.run { withAnimation { savedTick = false } }
+            }
+            return true
+        } catch {
+            saveError = error.localizedDescription
+            return false
         }
     }
 }
@@ -587,7 +780,7 @@ struct SpeechAppRow: View {
                 }
             }
         }
-        .modifier(ServiceCardStyle())
+        .modifier(ServiceInstanceCardStyle())
     }
 
     private var headerTitle: String {
@@ -624,6 +817,30 @@ struct ServiceCardStyle: ViewModifier {
     }
 }
 
+/// 把可选错误文案桥接成 Alert 所需的布尔 Binding。
+private func errorBinding(_ message: Binding<String?>) -> Binding<Bool> {
+    Binding(
+        get: { message.wrappedValue != nil },
+        set: { if !$0 { message.wrappedValue = nil } }
+    )
+}
+
+/// 服务实例使用更轻的内层卡片，体现“服务 → AppID”层级。
+struct ServiceInstanceCardStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.secondary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+            )
+    }
+}
+
 /// 测试状态。
 enum TestState {
     case idle
@@ -632,6 +849,66 @@ enum TestState {
     case failure(String)
 
     var isTesting: Bool { if case .testing = self { return true }; return false }
+}
+
+/// 为普通 SwiftUI Window 补上 staged editing 的关闭保护。
+private struct WindowCloseGuard: NSViewRepresentable {
+    let hasUnsavedChanges: Bool
+    let save: () -> Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.parent = self
+        DispatchQueue.main.async { context.coordinator.attach(to: view.window) }
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSWindowDelegate {
+        var parent: WindowCloseGuard
+        weak var window: NSWindow?
+        weak var previousDelegate: NSWindowDelegate?
+
+        init(parent: WindowCloseGuard) { self.parent = parent }
+
+        func attach(to window: NSWindow?) {
+            guard let window, self.window !== window else { return }
+            detach()
+            self.window = window
+            previousDelegate = window.delegate
+            window.delegate = self
+        }
+
+        func detach() {
+            if let window, window.delegate === self { window.delegate = previousDelegate }
+            window = nil
+            previousDelegate = nil
+        }
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            guard parent.hasUnsavedChanges else {
+                return previousDelegate?.windowShouldClose?(sender) ?? true
+            }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "有尚未保存的修改"
+            alert.informativeText = "关闭设置前是否保存当前账号的修改？"
+            alert.addButton(withTitle: "保存并关闭")
+            alert.addButton(withTitle: "不保存")
+            alert.addButton(withTitle: "取消")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: return parent.save()
+            case .alertSecondButtonReturn: return true
+            default: return false
+            }
+        }
+
+    }
 }
 
 // MARK: - 显示 Tab：菜单栏指标 + 刷新间隔

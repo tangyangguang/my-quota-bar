@@ -13,9 +13,17 @@ struct PopoverView: View {
             if model.visibleAccounts.isEmpty {
                 emptyState
             } else {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(model.visibleAccounts) { account in
-                        AccountSectionView(account: account)
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(platformGroups, id: \.name) { group in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label(group.name, systemImage: "cloud")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 16)
+                            ForEach(group.accounts) { account in
+                                AccountSectionView(account: account)
+                            }
+                        }
                     }
                 }
                 .padding(.vertical, 12)
@@ -25,6 +33,16 @@ struct PopoverView: View {
             footer
         }
         .frame(width: 320)
+    }
+
+    private var platformGroups: [(name: String, accounts: [Account])] {
+        var names: [String] = []
+        for account in model.visibleAccounts where !names.contains(account.platform) {
+            names.append(account.platform)
+        }
+        return names.map { name in
+            (name, model.visibleAccounts.filter { $0.platform == name })
+        }
     }
 
     private var header: some View {

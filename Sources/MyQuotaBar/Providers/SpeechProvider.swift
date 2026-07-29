@@ -16,6 +16,7 @@ struct SpeechProvider: Sendable {
 
     /// 语音服务原生一条资源包。
     struct Pack: Sendable {
+        let instanceID: String
         let title: String
         let purchased: String
         let used: String
@@ -26,28 +27,60 @@ struct SpeechProvider: Sendable {
         let type: String
     }
 
-    /// 拉取 ASR + TTS 两项资源包。任一失败不影响另一项。
-    func fetch() async throws -> [Pack] {
-        var packs: [Pack] = []
-        if let asr = try await queryPack(title: "语音识别 ASR", resourceIDs: ["volc.seedasr.sauc.duration"]) {
-            packs.append(asr)
-        }
-        if let tts = try await queryPack(title: "语音合成 TTS", resourceIDs: ["volc.tts.default"]) {
-            packs.append(tts)
-        }
-        return packs
+    struct FetchOutcome: Sendable {
+        let packs: [Pack]
+        /// key 为服务标题，value 为该分项错误；ASR/TTS 互不连坐。
+        let errors: [String: String]
     }
 
-    /// 测试：尝试拉一次语音资源包。返回成功与否 + 描述。
+    private struct QueryOutcome: Sendable {
+        let title: String
+        let packs: [Pack]
+        let error: String?
+    }
+
+    /// ASR 与 TTS 并行、分项容错；一个失败不会阻止另一个返回。
+    func fetchOutcome() async -> FetchOutcome {
+        async let asr = capture(title: "语音识别 ASR", resourceIDs: ["volc.seedasr.sauc.duration"])
+        async let tts = capture(title: "语音合成 TTS", resourceIDs: ["volc.tts.default"])
+        let outcomes = await [asr, tts]
+        let packs = outcomes.flatMap(\.packs)
+        let errors = Dictionary(uniqueKeysWithValues: outcomes.compactMap { item in
+            item.error.map { (item.title, $0) }
+        })
+        return FetchOutcome(packs: packs, errors: errors)
+    }
+
+    func fetch() async throws -> [Pack] {
+        let outcome = await fetchOutcome()
+        if outcome.packs.isEmpty, let message = outcome.errors.values.first {
+            throw QuotaError.commandFailed(message)
+        }
+        return outcome.packs
+    }
+
+    /// 测试：必须所有已查询分项都正常，部分成功会明确提示。
     func test() async -> (ok: Bool, message: String) {
+        let outcome = await fetchOutcome()
+        if !outcome.errors.isEmpty {
+            let details = outcome.errors.sorted { $0.key < $1.key }
+                .map { "\($0.key)：\($0.value)" }.joined(separator: "；")
+            if outcome.packs.isEmpty { return (false, details) }
+            return (false, "部分资源获取成功；\(details)")
+        }
+        if outcome.packs.isEmpty {
+            return (false, "连接成功，但该 AppID 下没查到语音资源包（确认 AppID 是否正确）")
+        }
+        return (true, "已获取 \(outcome.packs.count) 个资源包：" + outcome.packs.map(\.title).joined(separator: "、"))
+    }
+
+    private func capture(title: String, resourceIDs: [String]) async -> QueryOutcome {
         do {
-            let packs = try await fetch()
-            if packs.isEmpty {
-                return (false, "连接成功，但该 AppID 下没查到语音资源包（确认 AppID 是否正确）")
-            }
-            return (true, "已获取 \(packs.count) 个资源包：" + packs.map(\.title).joined(separator: "、"))
+            return QueryOutcome(title: title,
+                                packs: try await queryPacks(title: title, resourceIDs: resourceIDs),
+                                error: nil)
         } catch {
-            return (false, error.localizedDescription)
+            return QueryOutcome(title: title, packs: [], error: error.localizedDescription)
         }
     }
 
@@ -56,7 +89,7 @@ struct SpeechProvider: Sendable {
                    host: host, region: region, service: service)
     }
 
-    private func queryPack(title: String, resourceIDs: [String]) async throws -> Pack? {
+    private func queryPacks(title: String, resourceIDs: [String]) async throws -> [Pack] {
         let bodyObj: [String: Any] = [
             "AppID": appID,
             "ResourceID": resourceIDs,
@@ -89,23 +122,29 @@ struct SpeechProvider: Sendable {
             throw QuotaError.commandFailed("语音接口：\(msg)")
         }
         guard let result = root["Result"] as? [String: Any],
-              let list = result["Packs"] as? [[String: Any]],
-              let first = list.first else {
-            return nil
+              let list = result["Packs"] as? [[String: Any]] else {
+            return []
         }
 
-        let purchased = (first["purchased_amount"] as? String) ?? ""
-        let used = (first["current_usage"] as? String) ?? ""
-        let expires = (first["expires"] as? String) ?? ""
-        let type = (first["type"] as? String) ?? ""
-        let unit = purchased.contains("小时") ? "小时" : (purchased.contains("次") ? "次" : "")
+        return Self.parsePacks(title: title, list: list)
+    }
 
-        return Pack(
-            title: title, purchased: purchased, used: used, unit: unit,
-            purchasedValue: Self.numberFromLoose(purchased),
-            usedValue: Self.numberFromLoose(used),
-            expires: expires, type: type
-        )
+    static func parsePacks(title: String, list: [[String: Any]]) -> [Pack] {
+        list.enumerated().map { index, item in
+            let purchased = (item["purchased_amount"] as? String) ?? ""
+            let used = (item["current_usage"] as? String) ?? ""
+            let expires = (item["expires"] as? String) ?? ""
+            let type = (item["type"] as? String) ?? ""
+            let instance = (item["instance_number"] as? String)
+                ?? "\(title)-\(expires)-\(index)"
+            let unit = purchased.contains("小时") ? "小时" : (purchased.contains("次") ? "次" : "")
+            return Pack(
+                instanceID: instance, title: title, purchased: purchased, used: used, unit: unit,
+                purchasedValue: Self.numberFromLoose(purchased),
+                usedValue: Self.numberFromLoose(used),
+                expires: expires, type: type
+            )
+        }
     }
 
     /// 从 "20,000 次" / "8.79 小时" 里抽出数值。

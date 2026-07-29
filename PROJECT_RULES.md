@@ -16,8 +16,8 @@
 
 ## 当前状态（2026-07，重构后）
 
-**已完成并稳定运行**。核心能力：
-- ✅ **多平台架构**：`Platform` 枚举（目前仅 `volcengine`），字段已埋入数据结构，加新平台不动 schema。
+**当前版本：1.1.0（build 2），已完成并稳定运行。** 版本变化见 `CHANGELOG.md`。核心能力：
+- ✅ **多平台架构**：开放 `Platform` 标识 + `PlatformAdapter` 注册表（目前仅 `volcengine`）；未知平台原样保留，加新平台不破坏旧 schema。
 - ✅ **任意多账号**：每个账号一对 AK/SK，配置任意数量，可拖动排序。
 - ✅ **火山 Agent Plan**：AK/SK 直调 OpenAPI `GetAFPUsage`（**已彻底移除 arkcli 依赖**）。
 - ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度。
@@ -53,7 +53,7 @@
 - 图标窄（`imageScale(.small)`），跟随服务类型变化。
 
 ### 5. 防丢配置（关键约束）
-- 所有持久化结构用**防御式 Codable**：缺字段给默认值、未知枚举回落，**旧配置永不因 schema 变动丢失**。
+- 所有持久化结构用**防御式 Codable**：缺字段给默认值；未知平台保留原始 ID 并标记不支持，**绝不能误写成火山引擎**。
 - `AccountConfig` / `SpeechApp` 都自定义了 `init(from:)`，加新字段时务必保持这个习惯。
 - 有单测守这条底线（见"测试"节）。
 
@@ -66,7 +66,7 @@
 | 分发 | 直接发 `outputs/My Quota Bar.app`。ad-hoc 签名未公证，对方首次打开需 `xattr -cr "路径"` 清除 quarantine（README 有说明）。**零 CLI 依赖，朋友只需填 AK/SK。** |
 | 认证 | 账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift` |
 | 凭证存储 | AK/SK 加密存 macOS 钥匙串（按账号 UUID 隔离）；非敏感配置存 UserDefaults(JSON) |
-| 定时刷新 | 每源独立 Timer；刷新中不重复发起；出错保留上次有效值；休眠/断网感知；`.default` RunLoop + tolerance 降耗 |
+| 定时刷新 | 全 App 单一非重复调度 Timer；按源计算 nextAttempt；最多 4 个账号并发；失败指数退避；分项失败保留旧值；休眠/断网感知；Timer tolerance 降耗 |
 | 刷新间隔 | 默认 3 分钟（180s），可在「显示」设置按源独立调。上游有 5–30 分钟延迟 |
 | 运行形态 | `LSUIElement=true`，无 Dock 图标，仅菜单栏 |
 
@@ -99,8 +99,9 @@
 
 ## 数据模型（核心）
 
-- **`Platform`**（枚举，Codable）：`volcengine`。`displayName` 显示名；`from(_:)` 容错未知平台回落火山。加平台在此加 case。
-- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `speechApps[]`。**自定义 Codable 防丢配置**。AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。
+- **`Platform`**（开放标识 struct，Codable）：当前 `volcengine`。未知平台原样保留，`PlatformRegistry` 只公布当前可新建的平台。
+- **`PlatformAdapter`**（Platforms/）：声明平台凭证字段、身份测试和服务目录；当前实现 `VolcenginePlatformAdapter`。
+- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `enableSpeech` / `speechApps[]`。**自定义 Codable 防丢配置**；旧语音配置自动迁移为启用。AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。
 - **`SpeechApp`**：`id(UUID)` / `appID` / `label`。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。**自定义 Codable**。
 - **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串。
 - **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.speech`)（QuotaModels.swift）。
@@ -111,21 +112,23 @@
 my-quota-bar/
 ├── PROJECT_RULES.md               # 本文件（唯一权威背景）
 ├── README.md                      # 使用/构建/分发说明
+├── CHANGELOG.md                   # 版本变化与当前稳定基线
 ├── Package.swift
 ├── build-app.sh                   # 构建 + ad-hoc 签名（universal）
 ├── Resources/Info.plist           # LSUIElement=true, bundle id local.my.quota-bar
 ├── Sources/MyQuotaBar/
 │   ├── MyQuotaBarApp.swift         # @main, MenuBarExtra + 设置 Window
-│   ├── AppModel.swift              # 状态 + 账号CRUD + 定时刷新 + 菜单栏显示 + 测试方法
+│   ├── AppModel.swift              # 状态 + 账号CRUD + 单调度器/并发闸门 + 菜单栏显示 + 测试方法
 │   ├── Settings.swift              # 非账号设置持久化（菜单栏指标 / 刷新间隔）
 │   ├── Keychain.swift              # 钥匙串封装 + AccountConfig + SpeechApp + AccountStore
 │   ├── Models/
 │   │   └── QuotaModels.swift       # Platform / Account / Service / 各服务原样数据结构
+│   ├── Platforms/
+│   │   └── PlatformAdapter.swift   # 平台协议、服务目录、平台注册表、火山适配器
 │   ├── Providers/
 │   │   ├── VolcSigner.swift        # 共享 HMAC-SHA256 签名 + STS 身份查询
 │   │   ├── AgentPlanProvider.swift # Agent Plan 取数 + test()
-│   │   ├── SpeechProvider.swift    # 语音资源包取数 + test()
-│   │   └── ProcessRunner.swift     # 子进程工具（当前无 CLI 依赖，保留）
+│   │   └── SpeechProvider.swift    # 语音资源包分项并发取数 + test()
 │   └── Views/
 │       ├── PopoverView.swift       # 面板主视图（按账号分组平铺）
 │       ├── AccountSectionView.swift# 账号分组 + ServiceCardView 路由
@@ -133,7 +136,7 @@ my-quota-bar/
 │       ├── SpeechCardView.swift    # 语音展示卡片
 │       └── SettingsWindow.swift    # 设置窗口（账号主从布局 + 显示 Tab）
 ├── Tests/MyQuotaBarTests/
-│   └── MyQuotaBarTests.swift       # 单测（17 个）
+│   └── MyQuotaBarTests.swift       # 单测（20 个）
 ├── pics/                           # 截图（gitignore，含敏感信息）
 └── outputs/                        # 构建产物 .app（gitignore）
 ```
@@ -143,10 +146,11 @@ my-quota-bar/
 - **两个 Tab**：「账号」+「显示」。
 - **账号 Tab = 左右主从**：
   - 左边栏：账号列表（选中高亮 + **拖动排序**，影响面板顺序），左下 `+`(添加) / `−`(删除选中，二次确认)。
-  - 右侧详情：上「账号信息」(平台只读 / 名称 / 账号ID / AK / SK / 测试连接) + 下「服务」(Agent Plan 卡片 + 语音应用卡片们)。
-  - 底部「保存修改」：有改动才可点，点后闪"✓ 已保存"停留当前账号（不跳走）。
+  - 右侧顶部用分段控件明确分成「账号信息 / 服务管理」两个页面。
+  - 账号信息：平台只读 / 名称 / 账号ID / AK / SK / 测试连接；服务管理：Agent Plan 与语音服务同级卡片，AppID 是语音服务内部实例。
+  - 分页各自显示保存按钮；切换账号或关闭窗口遇到未保存修改必须提示保存/放弃/取消。
 - **添加账号**：独立小弹窗，平台 + AK/SK + 测试(可选，不挡保存) + 名称(测通自动填)。
-- **服务卡片**：Agent Plan 和每个语音应用都是统一 `ServiceCardStyle` 圆角卡片，视觉同级。语音应用卡片：标题(备注/AppID) + AppID(带标题) + 备注(带标题) + 测试按钮 + 删除。
+- **服务卡片**：Agent Plan 与语音服务使用统一 `ServiceCardStyle` 同级展示并各有开关；语音 AppID 用更轻的内层实例卡片。关闭语音服务时保留 AppID 配置。
 - **显示 Tab**：菜单栏显示哪个指标（Picker）；各源刷新间隔（**注意：间隔存 AppModel observable 属性，不是直读 UserDefaults，否则 Picker 会回弹**）。
 
 ## 开发约定（务必遵守）
@@ -157,9 +161,11 @@ my-quota-bar/
   ```
 - SwiftUI 在 `MenuBarExtra(.window)` 里**不要用会塌成 0 高度的 `ScrollView`** 包主内容（面板会显空）；主面板用自然撑高的 `VStack`。
 - **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）。仓库**公开**：AppID 用户填、AK/SK 存钥匙串、`pics/` 已 gitignore。
-- **每源独立刷新间隔**（`AppModel.RefreshSource`），各自定时器互不影响。
+- **每源独立刷新间隔**（`AppModel.RefreshSource`），但全 App 只用一个调度 Timer；禁止按账号创建 Timer。请求经并发闸门限制为最多 4 个账号并发。
 - **关键纯逻辑必须有单测**（数值格式化、百分比除零保护、AFP 解析、显示名、倒计时文案、**schema 演进兼容**）。改相关逻辑后 `swift test` 确保绿。
-- **凭证持久化**：AK/SK 一次配好永久存钥匙串，编辑账号自动回填，不需重复输入。改 `AccountConfig` 字段结构时务必保持防御式 Codable，否则旧配置会丢。
+- **凭证持久化**：AK/SK 一次配好永久存钥匙串，编辑账号自动回填。Keychain 必须原地 update、检查 OSStatus；两项写入失败要回滚，禁止先删旧值。
+- **配置保护**：主 JSON 覆盖前保留最近有效备份；主配置损坏时回退备份，主备份都损坏则锁定写入，绝不能以空数组覆盖原始数据。
+- **异步一致性**：账号配置带运行时代数 revision；账号修改/删除后旧请求结果必须丢弃，禁止“删除后又被旧响应加回来”。
 
 ## Git 工作流（务必遵守）
 
@@ -175,9 +181,9 @@ my-quota-bar/
 ## 加新平台 / 新服务（未来扩展指南）
 
 **加新平台**（如硅基流动）：
-1. `Platform` 枚举加 case + `displayName`。
-2. 写该平台的 Provider（它的余额接口 + 它的认证方式）。
-3. 添加账号弹窗按选中平台展示对应凭证输入（不同平台凭证形态可能不同）。
+1. 新增该平台的稳定 `Platform` ID，并实现 `PlatformAdapter`（凭证字段、身份测试、服务目录），注册进 `PlatformRegistry`。
+2. 写该平台的 Provider（余额/额度接口及认证方式）。
+3. 添加账号弹窗按 Adapter 的凭证描述展示对应输入（不同平台凭证形态可完全不同）。
 4. 火山账号完全不受影响，旧配置不丢。
 
 **加新服务**（如火山下别的语音种类）：

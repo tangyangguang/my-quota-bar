@@ -70,30 +70,47 @@ struct VolcSigner: Sendable {
         var friendlyName: String { userName ?? accountID }
     }
 
-    /// 查询当前 AK/SK 对应的身份（账号 ID + 用户名）。失败返回 nil。
-    static func fetchIdentity(accessKeyID: String, secretAccessKey: String) async -> Identity? {
+    /// 查询当前 AK/SK 对应的身份，保留 HTTP 与官方错误，供测试连接给出准确反馈。
+    static func identity(accessKeyID: String, secretAccessKey: String) async throws -> Identity {
         let signer = VolcSigner(
             accessKeyID: accessKeyID, secretAccessKey: secretAccessKey,
             host: "open.volcengineapi.com", region: "cn-north-1", service: "sts"
         )
         let req = signer.makeRequest(method: "GET", query: "Action=GetCallerIdentity&Version=2018-01-01", timeout: 15)
-        guard let (data, _) = try? await URLSession.shared.data(for: req),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = root["Result"] as? [String: Any] else { return nil }
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw QuotaError.parseFailed("身份接口返回格式错误")
+        }
+        if let meta = root["ResponseMetadata"] as? [String: Any],
+           let error = meta["Error"] as? [String: Any] {
+            let message = (error["Message"] as? String) ?? (error["Code"] as? String) ?? "身份验证失败"
+            throw QuotaError.commandFailed(message)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw QuotaError.commandFailed("身份接口 HTTP \(http.statusCode)")
+        }
+        guard let result = root["Result"] as? [String: Any] else {
+            throw QuotaError.parseFailed("身份响应缺少 Result")
+        }
         let accountID: String
         if let id = result["AccountId"] as? NSNumber { accountID = id.stringValue }
         else if let id = result["AccountId"] as? String { accountID = id }
-        else { return nil }
+        else { throw QuotaError.parseFailed("身份响应缺少 AccountId") }
+
         // Trn 形如 trn:iam::2130011074:user/小明 → 取最后一段作为用户名
         var userName: String?
         if let trn = result["Trn"] as? String, let last = trn.split(separator: "/").last {
             let name = String(last)
-            if !name.isEmpty, name != "user" { userName = name }  // “user” 是默认占位，不用
+            if !name.isEmpty, name != "user" { userName = name }
         }
         return Identity(accountID: accountID, userName: userName)
     }
 
-    /// 兼容旧调用：只要账号 ID。
+    /// 后台补账号 ID 时不打扰用户，失败返回 nil；测试连接应使用 identity() 获取具体错误。
+    static func fetchIdentity(accessKeyID: String, secretAccessKey: String) async -> Identity? {
+        try? await identity(accessKeyID: accessKeyID, secretAccessKey: secretAccessKey)
+    }
+
     static func fetchAccountID(accessKeyID: String, secretAccessKey: String) async -> String? {
         await fetchIdentity(accessKeyID: accessKeyID, secretAccessKey: secretAccessKey)?.accountID
     }

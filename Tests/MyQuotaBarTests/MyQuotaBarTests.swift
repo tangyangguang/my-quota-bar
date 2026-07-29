@@ -66,6 +66,19 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(SpeechProvider.numberFromLoose("1,234.5 万"), 1234.5)
     }
 
+    func testSpeechProviderKeepsAllResourcePacks() {
+        let list: [[String: Any]] = [
+            ["instance_number": "pack-a", "purchased_amount": "20.00 小时",
+             "current_usage": "3.00 小时", "expires": "2027-01-01", "type": "试用包"],
+            ["instance_number": "pack-b", "purchased_amount": "10.00 小时",
+             "current_usage": "1.00 小时", "expires": "2027-02-01", "type": "购买包"]
+        ]
+        let packs = SpeechProvider.parsePacks(title: "语音识别 ASR", list: list)
+        XCTAssertEqual(packs.count, 2)
+        XCTAssertEqual(packs.map(\.instanceID), ["pack-a", "pack-b"])
+        XCTAssertEqual(packs.map(\.purchasedValue), [20, 10])
+    }
+
     // MARK: - Agent Plan AFP API 解析（GetAFPUsage 响应格式）
 
     /// 模拟一次完整的 AFP 响应。
@@ -113,14 +126,16 @@ final class MyQuotaBarTests: XCTestCase {
     }
 
     func testParseAFPErrorResponse() throws {
-        // 错误响应
+        // 错误响应没有 Result，也必须保留官方错误信息而非报“格式错误”。
         let err: [String: Any] = [
             "ResponseMetadata": [
                 "Error": ["Code": "AuthFailure", "Message": "InvalidAccessKeyId"]
             ]
         ]
         let data = try! JSONSerialization.data(withJSONObject: err, options: [.sortedKeys])
-        XCTAssertThrowsError(try AgentPlanProvider.parse(data))
+        XCTAssertThrowsError(try AgentPlanProvider.parse(data)) { error in
+            XCTAssertEqual(error.localizedDescription, "命令执行失败：InvalidAccessKeyId")
+        }
     }
 
     // MARK: - 账号显示名（别名 > 默认名 > “账号”，拼尾号）
@@ -135,6 +150,15 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(acc(def: "", tail: "1074", alias: nil).displayName, "火山引擎 · 账号 (…1074)")
         XCTAssertEqual(acc(def: "张三", tail: nil, alias: nil).displayName, "火山引擎 · 张三")
         XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "").displayName, "火山引擎 · 张三 (…7443)")
+        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "工作号").accountDisplayName, "工作号 (…7443)")
+    }
+
+    func testPlatformRegistry() {
+        XCTAssertEqual(PlatformRegistry.supportedPlatforms, [.volcengine])
+        let adapter = PlatformRegistry.adapter(for: .volcengine)
+        XCTAssertEqual(adapter?.services.map(\.id), ["agent-plan", "speech"])
+        XCTAssertEqual(adapter?.credentialFields.map(\.id), ["accessKeyID", "secretAccessKey"])
+        XCTAssertNil(PlatformRegistry.adapter(for: Platform(rawValue: "future-platform")))
     }
 
     func testAccountEffectiveName() {
@@ -157,16 +181,31 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(config.id, "abc")
         XCTAssertEqual(config.alias, "主账号")
         XCTAssertTrue(config.enableAgentPlan)
+        XCTAssertFalse(config.enableSpeech)
         XCTAssertEqual(config.platform, .volcengine)   // 缺失 platform 回落火山
     }
 
+    func testLegacySpeechAppsRemainEnabledAfterMigration() throws {
+        let legacy = """
+        {"id":"speech","alias":"语音账号","enableAgentPlan":false,
+         "speechApps":[{"id":"a","appID":"123","label":"A"}]}
+        """
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(legacy.utf8))
+        XCTAssertTrue(config.enableSpeech)
+        XCTAssertEqual(config.speechApps.count, 1)
+    }
+
     func testAccountConfigDecodesUnknownPlatform() throws {
-        // 未来降级：JSON 里是本版本不认识的平台
+        // 未来降级：原样保留本版本不认识的平台，绝不能污染成火山引擎。
         let future = """
         {"id":"x","platform":"unknown_platform","alias":"","enableAgentPlan":false,"speechApps":[]}
         """
         let config = try JSONDecoder().decode(AccountConfig.self, from: Data(future.utf8))
-        XCTAssertEqual(config.platform, .volcengine)   // 未知平台回落，不崩
+        XCTAssertEqual(config.platform.rawValue, "unknown_platform")
+        XCTAssertFalse(config.platform.isSupported)
+        let roundTrip = try JSONDecoder().decode(AccountConfig.self,
+                                                  from: JSONEncoder().encode(config))
+        XCTAssertEqual(roundTrip.platform.rawValue, "unknown_platform")
     }
 
     func testAccountConfigRoundTrip() throws {
@@ -176,6 +215,7 @@ final class MyQuotaBarTests: XCTestCase {
         let data = try JSONEncoder().encode(orig)
         let back = try JSONDecoder().decode(AccountConfig.self, from: data)
         XCTAssertEqual(orig, back)
+        XCTAssertTrue(back.enableSpeech)
     }
 
     // MARK: - 重置倒计时文案（分/时/天边界 + 过去时间）

@@ -31,15 +31,17 @@ struct AgentPlanProvider: Sendable {
     }
 
     static func parse(_ data: Data) throws -> AgentPlan {
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = root["Result"] as? [String: Any] else {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw QuotaError.parseFailed("AFP 响应格式错误")
         }
-        // 检查错误
+        // 错误响应通常没有 Result，必须先保留官方错误信息。
         if let meta = root["ResponseMetadata"] as? [String: Any],
            let err = meta["Error"] as? [String: Any] {
-            let msg = (err["Message"] as? String) ?? "AFP 接口错误"
+            let msg = (err["Message"] as? String) ?? (err["Code"] as? String) ?? "AFP 接口错误"
             throw QuotaError.commandFailed(msg)
+        }
+        guard let result = root["Result"] as? [String: Any] else {
+            throw QuotaError.parseFailed("AFP 响应缺少 Result")
         }
 
         let planType = result["PlanType"] as? String ?? ""
