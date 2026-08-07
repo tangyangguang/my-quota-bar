@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Agent Plan 专属展示卡片：三个窗口，每行进度条 + 百分比 + 已用/总量 + 重置时间。
-/// 每个 period 是一个「可钉为菜单栏」的指标，右上角统一带 PinBadge（位置与语音服务一致）。
+/// 每个 period 是一个「可钉为菜单栏」的指标，右上角浮一个 pin 小圆（不挤 UI）。
 struct AgentPlanCardView: View {
     let plan: AgentPlan
     let account: Account
@@ -28,8 +28,6 @@ struct AgentPlanCardView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(QuotaColor.bar(p.remainingPercent))
                     .monospacedDigit()
-                    // 为右上角 PinBadge 让出空间，避免压到“剩 X%”。
-                    .padding(.trailing, 22)
             }
 
             ProgressBar(fraction: p.percent / 100, color: QuotaColor.bar(p.remainingPercent))
@@ -48,7 +46,7 @@ struct AgentPlanCardView: View {
                 }
             }
         }
-        .metricRow(
+        .menuBarPin(
             isPinned: model.selectedMetricID == mid,
             action: { model.selectedMetricID = mid }
         )

@@ -29,9 +29,8 @@ struct AccountSectionView: View {
 
 /// 服务卡片路由：按 content 形态分发到各服务专属展示视图。
 ///
-/// 布局约定：所有「可作为菜单栏指标」的内容单元，都用 `.metricRow(...)` 包裹，
-/// 由 modifier 在右上角统一插上同一个 PinBadge。这样 pin 图标的位置永远一致，
-/// 眼睛不需要在不同服务里重新适应锚点。
+/// 「钉为菜单栏」快捷方式作为 .menuBarPin(...) 修饰插上——
+/// 原 UI 一动不动，徽章用 overlay 浮在右上角、不参与布局。
 struct ServiceCardView: View {
     let service: Service
     let account: Account
@@ -39,24 +38,16 @@ struct ServiceCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // 服务标题（如「Agent Plan·medium」或「应用 1234 · 语音识别 ASR」）
-            HStack(spacing: 6) {
-                Text(service.title)
-                    .font(.system(size: 12, weight: .semibold))
-                if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
-                    badge(plan.tier)
-                }
-                if case .speech(let pack) = service.content, !pack.type.isEmpty {
-                    badge(pack.type)
-                }
-                Spacer()
-            }
+            // 服务标题行（如「Agent Plan·medium」或「应用 1234 · 语音识别 ASR」）。
+            // 「剩 X%」仍在该行右端，原布局不动。
+            // 语音服务作为单个指标行，右上角浮 pin 圆；Agent Plan 每个 period 各自右上有 pin。
+            titleRow
 
             switch service.content {
             case .agentPlan(let plan):
                 AgentPlanCardView(plan: plan, account: account, service: service, model: model)
             case .speech(let pack):
-                SpeechCardView(pack: pack, account: account, service: service, model: model)
+                SpeechCardView(pack: pack)
             }
 
             if service.status == .error, let msg = service.errorMessage {
@@ -74,6 +65,37 @@ struct ServiceCardView: View {
         .opacity(service.status == .error ? 0.7 : 1)
     }
 
+    /// 服务标题行：语音服务会同时被赋予「钉为菜单栏」的右上角 pin 圆。
+    @ViewBuilder
+    private var titleRow: some View {
+        let row = HStack(spacing: 6) {
+            Text(service.title)
+                .font(.system(size: 12, weight: .semibold))
+            if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
+                badge(plan.tier)
+            }
+            if case .speech(let pack) = service.content, !pack.type.isEmpty {
+                badge(pack.type)
+            }
+            Spacer()
+            if case .speech(let pack) = service.content, !pack.purchased.isEmpty {
+                Text("剩 \(Formatting.percent(pack.remainingPercent))%")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(QuotaColor.bar(pack.remainingPercent))
+                    .monospacedDigit()
+            }
+        }
+        if case .speech(let pack) = service.content, !pack.purchased.isEmpty {
+            let mid = model.metricID(account: account, service: service, sub: pack.title)
+            row.menuBarPin(
+                isPinned: model.selectedMetricID == mid,
+                action: { model.selectedMetricID = mid }
+            )
+        } else {
+            row
+        }
+    }
+
     @ViewBuilder
     private func badge(_ text: String) -> some View {
         Text(text)
@@ -84,13 +106,16 @@ struct ServiceCardView: View {
     }
 }
 
-/// 一行可作为菜单栏指标的视图的修饰：
-/// - 在该行右上角固定插一个可点击的 PinBadge
-/// - 鼠标悬停该行任意位置时浮现（未钉状态）
-/// - 已钉时常显，主题色 + 弹性动画
+/// 「钉为菜单栏」View Modifier：
+/// - 在 row 右上角浮一个微小的 pin 圆点（原布局完全不动）
+/// - 未钉 + 未 hover：不渲染任何东西（零视觉噪音）
+/// - 未钉 + hover：出现软背景下的小 pin 圆
+/// - 已钉：常显主题色实心 pin 圆
+/// - 点击圆点：切换菜单栏指标
 ///
-/// 关键是位置：所有 metric 行都遵偈同一个右上方锚点，不随内容不同而跳动。
-struct MetricRowModifier: ViewModifier {
+/// 【位置】徽章不参与布局，用 .overlay(alignment: .topTrailing) 盖在 row 的角上，
+/// 偏上 -2pt、偏右 -2pt，让小圆真正贴近右上角，不挤占「剩 X%」的布局位置。
+struct MenuBarPinModifier: ViewModifier {
     let isPinned: Bool
     let action: () -> Void
 
@@ -99,43 +124,43 @@ struct MetricRowModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .topTrailing) {
-                Button(action: action) {
-                    PinBadge(isPinned: isPinned, hovered: hovered)
+                if isPinned || hovered {
+                    Button(action: action) {
+                        PinDot(isPinned: isPinned)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, -2)
+                    .padding(.trailing, -2)
+                    .transition(.scale.combined(with: .opacity))
+                    .help(isPinned ? "当前菜单栏显示这个指标" : "点击钉为菜单栏常驻显示")
                 }
-                .buttonStyle(.plain)
-                .padding(.top, -2)     // 贴近上边，避开 “剩 X%” 中部
-                .padding(.trailing, -2) // 略微超出右边，看起来是 “钉上去”
-                .opacity(isPinned ? 1 : (hovered ? 1 : 0))
-                .animation(.easeOut(duration: 0.12), value: hovered)
-                .animation(.spring(response: 0.28, dampingFraction: 0.7), value: isPinned)
-                .help(isPinned ? "当前菜单栏显示这个指标" : "点击钉为菜单栏常驻显示")
             }
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
+            .animation(.easeOut(duration: 0.15), value: hovered)
+            .animation(.spring(response: 0.32, dampingFraction: 0.72), value: isPinned)
     }
 }
 
 extension View {
-    /// 标记该 View 为一个「可钉为菜单栏」的指标行。
+    /// 在原视图右上角浮一个「钉为菜单栏」的快捷圆点。不影响原布局。
     /// - Parameters:
     ///   - isPinned: 是否当前是菜单栏显示的指标
-    ///   - action: 点击 PinBadge 时的动作
-    func metricRow(isPinned: Bool, action: @escaping () -> Void) -> some View {
-        modifier(MetricRowModifier(isPinned: isPinned, action: action))
+    ///   - action: 点击时调用的切换动作
+    func menuBarPin(isPinned: Bool, action: @escaping () -> Void) -> some View {
+        modifier(MenuBarPinModifier(isPinned: isPinned, action: action))
     }
 }
 
-/// 右上角的小徽章：empty pin → hover浮现；pinned → 常显 + 主题色。
-/// 保持紧凑：只一个 pin 图标 + 软背景，从远处也能一眼看出「这个是菜单栏指标」。
-struct PinBadge: View {
+/// 徽章本身：只一个 14pt 圆 + pin 图标。极小，不抢戏。
+struct PinDot: View {
     let isPinned: Bool
-    let hovered: Bool
 
     var body: some View {
         Image(systemName: isPinned ? "pin.fill" : "pin")
-            .font(.system(size: 10, weight: .bold))
+            .font(.system(size: 9, weight: .bold))
             .foregroundStyle(isPinned ? Color.white : Color.accentColor)
-            .frame(width: 18, height: 18)
+            .frame(width: 14, height: 14)
             .background(
                 Circle().fill(
                     isPinned
@@ -145,14 +170,13 @@ struct PinBadge: View {
             )
             .overlay(
                 Circle().stroke(
-                    isPinned ? Color.clear : Color.accentColor.opacity(0.4),
+                    isPinned ? Color.clear : Color.accentColor.opacity(0.45),
                     lineWidth: 0.5
                 )
             )
             .shadow(
-                color: .black.opacity(isPinned ? 0.22 : 0.10),
-                radius: isPinned ? 2 : 1.2, y: 1
+                color: .black.opacity(isPinned ? 0.22 : 0.12),
+                radius: isPinned ? 1.6 : 1.0, y: 0.6
             )
-            .scaleEffect(isPinned ? 1.0 : (hovered ? 1.0 : 0.88))
     }
 }
