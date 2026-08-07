@@ -30,9 +30,8 @@ struct AccountSectionView: View {
 /// 服务卡片路由：按 content 形态分发到各服务专属展示视图。
 ///
 /// 「钉为菜单栏」实现遵循 macOS 原生范式：整行可点击 = 切换；
-/// 当前选中项靠「左侧强调色条 + 背景色微变」表达——
-/// 类似 Finder 「按名称排序」列头高亮、Things 的「今天」列视觉权重。
-/// **不靠加新元素，靠强化现有元素**。原 UI 100% 保留，位置不动。
+/// 当前选中项靠「背景色微变 + 左侧淑出光带」表达——轻量暗示。
+/// **不靠加色条/加粗/换色，靠柔的背景与淑出光晕**。原 UI 100% 保留，位置不动。
 struct ServiceCardView: View {
     let service: Service
     let account: Account
@@ -114,9 +113,9 @@ struct ServiceCardView: View {
 ///
 /// 设计原则（macOS 原生范式）：
 /// 1. **整行可点击** = 钉为菜单栏（cursor: pointer / hover 高亮 / tooltip 提示）
-/// 2. **当前菜单栏在显示的那一项**用「左侧 3pt 主题色条 + 背景色微变」表达，
-///    类似 Finder 选中行 / Things 「今天」列高亮——**不靠加新元素，靠强化现有元素**。
-/// 3. 原 UI 100% 保留：标签、剩 X%、进度条、tier badge 位置一概不动。
+/// 2. **当前菜单栏在显示的那一项**靠「背景色微变 + 左侧极淡渐变光带」表达，克制轻量——
+///    色条原本是「色色声明」，换成从左向右淑出的渐变光晕，变成「光的暗示」。
+/// 3. 原 UI 100% 保留：标签、剩 X%、进度条、tier badge 位置、颜色一概不动。
 ///
 /// 【叠加】用 .overlay（不是 .background）作背景叠层，以避免被原视图的 controlBackground
 /// 背景遮住。仅在 pinned / hover 时添加色块，不影响任何原背景。
@@ -129,28 +128,34 @@ struct MenuBarPinRowModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay {
-                // 背景叠层：已钉=柔和主题色;hover=更谈的 accent;
-                // 使用 RoundedRectangle 贴合原视图的圆角
+                // 背景叠层：已钉=柔的主题色;hover=更谈的 accent;
+                // 使用 RoundedRectangle 贴合原视图的圆角。
                 RoundedRectangle(cornerRadius: 8)
                     .fill(
                         isPinned
-                        ? Color.accentColor.opacity(hovered ? 0.18 : 0.12)
-                        : (hovered ? Color.accentColor.opacity(0.06) : Color.clear)
+                        ? Color.accentColor.opacity(hovered ? 0.10 : 0.07)
+                        : (hovered ? Color.accentColor.opacity(0.04) : Color.clear)
                     )
                     .allowsHitTesting(false)
                     .animation(.easeOut(duration: 0.15), value: isPinned)
                     .animation(.easeOut(duration: 0.12), value: hovered)
             }
             .overlay(alignment: .leading) {
-                // 左侧 3pt 主题色条 —— 已钉时常显
+                // 已钉时从左向右淑出的极淡渐变光带（不是色条）——
+                // 6% 主题色、宽 16pt、向右淑出至 0。
+                // 只有已钉时才出现；hover 时不出现，状态区分明确。
                 if isPinned {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.accentColor)
-                        .frame(width: 3)
-                        .padding(.vertical, 6)
-                        .padding(.leading, 3)
-                        .transition(.opacity.combined(with: .scale(scale: 0.5, anchor: .leading)))
-                        .allowsHitTesting(false)
+                    LinearGradient(
+                        colors: [
+                            Color.accentColor.opacity(0.06),
+                            Color.accentColor.opacity(0)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: 16)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: 8))
@@ -164,7 +169,7 @@ struct MenuBarPinRowModifier: ViewModifier {
 }
 
 extension View {
-    /// 把一行标记为「可钉为菜单栏」的指标行：整行可点击，当前项靠左侧色条 + 背景高亮表达。
+    /// 把一行标记为「可钉为菜单栏」的指标行：整行可点击，当前项靠背景微变 + 左侧淑出光带表达。
     /// - Parameters:
     ///   - isPinned: 是否当前是菜单栏显示的指标
     ///   - action: 点击该行时调用的切换动作
