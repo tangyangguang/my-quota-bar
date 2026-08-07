@@ -46,7 +46,9 @@ struct AgentPlanCardView: View {
                 }
             }
         }
-        .menuBarPin(
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .menuBarPinRow(
             isPinned: model.selectedMetricID == mid,
             action: { model.selectedMetricID = mid }
         )
