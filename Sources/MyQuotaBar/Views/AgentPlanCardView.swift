@@ -1,6 +1,7 @@
 import SwiftUI
 
 /// Agent Plan 专属展示卡片：三个窗口，每行进度条 + 百分比 + 已用/总量 + 重置时间。
+/// 每个 period 是一个「可钉为菜单栏」的指标，右上角统一带 PinBadge（位置与语音服务一致）。
 struct AgentPlanCardView: View {
     let plan: AgentPlan
     let account: Account
@@ -17,22 +18,18 @@ struct AgentPlanCardView: View {
 
     @ViewBuilder
     private func periodRow(_ p: AgentPlanPeriod) -> some View {
+        let mid = model.metricID(account: account, service: service, sub: p.label)
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(p.displayName)
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
-                // 每个 period 都是可独立钉到菜单栏的指标，hover 时按钮显现。
-                PinToMenuBarButton(
-                    metricID: model.metricID(account: account, service: service, sub: p.label),
-                    currentlyPinned: model.selectedMetricID == model.metricID(account: account, service: service, sub: p.label)
-                ) {
-                    model.selectedMetricID = model.metricID(account: account, service: service, sub: p.label)
-                }
                 Text("剩 \(Formatting.percent(p.remainingPercent))%")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(QuotaColor.bar(p.remainingPercent))
                     .monospacedDigit()
+                    // 为右上角 PinBadge 让出空间，避免压到“剩 X%”。
+                    .padding(.trailing, 22)
             }
 
             ProgressBar(fraction: p.percent / 100, color: QuotaColor.bar(p.remainingPercent))
@@ -51,6 +48,10 @@ struct AgentPlanCardView: View {
                 }
             }
         }
+        .metricRow(
+            isPinned: model.selectedMetricID == mid,
+            action: { model.selectedMetricID = mid }
+        )
     }
 }
 
