@@ -3,6 +3,9 @@ import SwiftUI
 /// Agent Plan 专属展示卡片：三个窗口，每行进度条 + 百分比 + 已用/总量 + 重置时间。
 struct AgentPlanCardView: View {
     let plan: AgentPlan
+    let account: Account
+    let service: Service
+    @Bindable var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -19,6 +22,13 @@ struct AgentPlanCardView: View {
                 Text(p.displayName)
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
+                // 每个 period 都是可独立钉到菜单栏的指标，hover 时按钮显现。
+                PinToMenuBarButton(
+                    metricID: model.metricID(account: account, service: service, sub: p.label),
+                    currentlyPinned: model.selectedMetricID == model.metricID(account: account, service: service, sub: p.label)
+                ) {
+                    model.selectedMetricID = model.metricID(account: account, service: service, sub: p.label)
+                }
                 Text("剩 \(Formatting.percent(p.remainingPercent))%")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(QuotaColor.bar(p.remainingPercent))

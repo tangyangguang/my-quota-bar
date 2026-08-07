@@ -226,7 +226,8 @@ final class AppModel {
     var menuBarText: String { currentMetric?.display.menuBarText ?? "--" }
     var menuBarSymbol: String { currentMetric?.symbol ?? "gauge" }
 
-    private func metricID(account: Account, service: Service, sub: String) -> String {
+    /// 公开：供面板视图构造 metric id（用于"置顶到菜单栏"快捷方式）。
+    func metricID(account: Account, service: Service, sub: String) -> String {
         "\(account.id)/\(service.id)/\(sub)"
     }
 

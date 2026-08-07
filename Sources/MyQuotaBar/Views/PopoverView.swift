@@ -21,7 +21,7 @@ struct PopoverView: View {
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 16)
                             ForEach(group.accounts) { account in
-                                AccountSectionView(account: account)
+                                AccountSectionView(account: account, model: model)
                             }
                         }
                     }

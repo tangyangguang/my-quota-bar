@@ -622,15 +622,19 @@ struct AccountDetailView: View {
     private var currentSK: String { sk }
 
     /// 是否有未保存的修改（与当前 account 配置对比）。
+    /// 注意：仅在 `load()` 完成后才有意义；初始 @State 默认值一定不等于存储值，
+    /// 不能据此判断用户做了修改。`onAppear` 会在第一次 body 渲染之后才触发，
+    /// 中间这一帧的 `dirty` 必须返回 false，否则会误报"尚未保存"。
     private var dirty: Bool {
+        guard loaded else { return false }
         if keysDirty { return true }
         if alias.trimmingCharacters(in: .whitespacesAndNewlines) != account.alias { return true }
         if enableAgentPlan != account.enableAgentPlan { return true }
         if enableSpeech != account.enableSpeech { return true }
         let cur: [SpeechApp] = speechApps.compactMap { d in
-            let id = d.appID.trimmingCharacters(in: .whitespaces)
-            guard !id.isEmpty else { return nil }
-            return SpeechApp(id: d.id, appID: id, label: d.label.trimmingCharacters(in: .whitespaces))
+            let trimmed = d.appID.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return nil }
+            return SpeechApp(id: d.id, appID: trimmed, label: d.label.trimmingCharacters(in: .whitespaces))
         }
         return cur != account.speechApps
     }
