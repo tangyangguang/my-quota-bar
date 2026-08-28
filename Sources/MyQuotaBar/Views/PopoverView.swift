@@ -4,6 +4,7 @@ import SwiftUI
 struct PopoverView: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var accountsContentHeight: CGFloat = PanelContentLayout.minimumHeight
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -13,20 +14,31 @@ struct PopoverView: View {
             if model.visibleAccounts.isEmpty {
                 emptyState
             } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    ForEach(platformGroups, id: \.name) { group in
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label(group.name, systemImage: "cloud")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 16)
-                            ForEach(group.accounts) { account in
-                                AccountSectionView(account: account, model: model)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(platformGroups, id: \.name) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label(group.name, systemImage: "cloud")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.horizontal, 16)
+                                ForEach(group.accounts) { account in
+                                    AccountSectionView(account: account, model: model)
+                                }
                             }
                         }
                     }
+                    .padding(.vertical, 12)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: PanelContentHeightKey.self,
+                                                   value: proxy.size.height)
+                        }
+                    }
                 }
-                .padding(.vertical, 12)
+                .frame(height: PanelContentLayout.scrollHeight(for: accountsContentHeight))
+                .onPreferenceChange(PanelContentHeightKey.self) { accountsContentHeight = $0 }
             }
 
             Divider()
@@ -100,6 +112,24 @@ struct PopoverView: View {
         .font(.system(size: 13))
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+}
+
+// MARK: - 面板内容尺寸
+
+private struct PanelContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = PanelContentLayout.minimumHeight
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+enum PanelContentLayout {
+    static let minimumHeight: CGFloat = 90
+    static let maximumHeight: CGFloat = 640
+
+    static func scrollHeight(for contentHeight: CGFloat) -> CGFloat {
+        min(max(contentHeight, minimumHeight), maximumHeight)
     }
 }
 

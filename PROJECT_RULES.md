@@ -136,7 +136,7 @@ my-quota-bar/
 │       ├── SpeechCardView.swift    # 语音展示卡片
 │       └── SettingsWindow.swift    # 设置窗口（账号主从布局 + 显示 Tab）
 ├── Tests/MyQuotaBarTests/
-│   └── MyQuotaBarTests.swift       # 单测（21 个）
+│   └── MyQuotaBarTests.swift       # 单测（22 个）
 ├── pics/                           # 截图（gitignore，含敏感信息）
 └── outputs/                        # 构建产物 .app（gitignore）
 ```
@@ -159,7 +159,7 @@ my-quota-bar/
   ```bash
   cd ~/workspace/my-quota-bar && pkill -9 -f MyQuotaBar; sleep 2 && ./build-app.sh && open "outputs/My Quota Bar.app"
   ```
-- SwiftUI 在 `MenuBarExtra(.window)` 里**不要用会塌成 0 高度的 `ScrollView`** 包主内容（面板会显空）；主面板用自然撑高的 `VStack`。
+- SwiftUI 在 `MenuBarExtra(.window)` 里的滚动区必须先测量内容并设置非零显式高度，避免 `ScrollView` 塌成 0；内容未超上限时使用自然高度，超出后才滚动。
 - **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）。仓库**公开**：AppID 用户填、AK/SK 存钥匙串、`pics/` 已 gitignore。
 - **每源独立刷新间隔**（`AppModel.RefreshSource`），但全 App 只用一个调度 Timer；禁止按账号创建 Timer。请求经并发闸门限制为最多 4 个账号并发。
 - **关键纯逻辑必须有单测**（数值格式化、百分比除零保护、AFP 解析、显示名、倒计时文案、**schema 演进兼容**）。改相关逻辑后 `swift test` 确保绿。

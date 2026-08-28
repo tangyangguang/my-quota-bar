@@ -236,6 +236,14 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertNotEqual(editedDraft, baseline)
     }
 
+    // MARK: - 面板多账号内容高度
+
+    func testPanelContentHeightUsesNaturalHeightUntilItNeedsScrolling() {
+        XCTAssertEqual(PanelContentLayout.scrollHeight(for: 40), 90)
+        XCTAssertEqual(PanelContentLayout.scrollHeight(for: 420), 420)
+        XCTAssertEqual(PanelContentLayout.scrollHeight(for: 900), 640)
+    }
+
     // MARK: - 重置倒计时文案（分/时/天边界 + 过去时间）
 
     func testRelativeReset() {
