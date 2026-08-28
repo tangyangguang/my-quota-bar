@@ -410,7 +410,6 @@ struct AccountDetailView: View {
     @State private var alias = ""
     @State private var ak = ""
     @State private var sk = ""
-    @State private var keysDirty = false
     @State private var credState = TestState.idle
 
     // 服务
@@ -419,7 +418,7 @@ struct AccountDetailView: View {
     @State private var enableSpeech = false
     @State private var speechApps: [SpeechAppDraft] = []
 
-    @State private var loaded = false
+    @State private var baseline: AccountEditSnapshot?
     @State private var savedTick = false   // 保存后短暂显示“已保存”
     @State private var saveError: String?
 
@@ -520,12 +519,12 @@ struct AccountDetailView: View {
 
             LabeledContent("Access Key") {
                 RevealableField(title: "Access Key ID", text: $ak)
-                    .onChange(of: ak) { keysDirty = true; credState = .idle }
+                    .onChange(of: ak) { credState = .idle }
                     .frame(maxWidth: 260)
             }
             LabeledContent("Secret Key") {
                 RevealableField(title: "Secret Access Key", text: $sk)
-                    .onChange(of: sk) { keysDirty = true; credState = .idle }
+                    .onChange(of: sk) { credState = .idle }
                     .frame(maxWidth: 260)
             }
             HStack(spacing: 8) {
@@ -621,22 +620,17 @@ struct AccountDetailView: View {
     private var currentAK: String { ak }
     private var currentSK: String { sk }
 
-    /// 是否有未保存的修改（与当前 account 配置对比）。
-    /// 注意：仅在 `load()` 完成后才有意义；初始 @State 默认值一定不等于存储值，
-    /// 不能据此判断用户做了修改。`onAppear` 会在第一次 body 渲染之后才触发，
-    /// 中间这一帧的 `dirty` 必须返回 false，否则会误报"尚未保存"。
+    /// 是否有未保存的有效修改。基线只在所有字段加载完成后建立，避免初始化过程中
+    /// SwiftUI 逐个更新 @State 时把中间状态误报成用户编辑。
     private var dirty: Bool {
-        guard loaded else { return false }
-        if keysDirty { return true }
-        if alias.trimmingCharacters(in: .whitespacesAndNewlines) != account.alias { return true }
-        if enableAgentPlan != account.enableAgentPlan { return true }
-        if enableSpeech != account.enableSpeech { return true }
-        let cur: [SpeechApp] = speechApps.compactMap { d in
-            let trimmed = d.appID.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { return nil }
-            return SpeechApp(id: d.id, appID: trimmed, label: d.label.trimmingCharacters(in: .whitespaces))
-        }
-        return cur != account.speechApps
+        guard let baseline else { return false }
+        return currentSnapshot != baseline
+    }
+
+    private var currentSnapshot: AccountEditSnapshot {
+        AccountEditSnapshot(alias: alias, ak: ak, sk: sk,
+                            enableAgentPlan: enableAgentPlan, enableSpeech: enableSpeech,
+                            speechApps: speechApps)
     }
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
@@ -671,34 +665,30 @@ struct AccountDetailView: View {
     }
 
     private func load() {
-        guard !loaded else { return }
-        loaded = true
+        guard baseline == nil else { return }
         alias = account.alias
         enableAgentPlan = account.enableAgentPlan
         enableSpeech = account.enableSpeech
         speechApps = account.speechApps.map { SpeechAppDraft(id: $0.id, appID: $0.appID, label: $0.label) }
         let cred = model.credentials(for: account.id)
-        ak = cred.ak; sk = cred.sk
-        keysDirty = false
+        ak = cred.ak
+        sk = cred.sk
+        baseline = currentSnapshot
     }
 
     @discardableResult
     private func save() -> Bool {
         guard dirty else { return true }
-        let aliasT = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apps: [SpeechApp] = speechApps.compactMap { d in
-            let id = d.appID.trimmingCharacters(in: .whitespaces)
-            guard !id.isEmpty else { return nil }
-            return SpeechApp(id: d.id, appID: id, label: d.label.trimmingCharacters(in: .whitespaces))
-        }
-        let newAK: String? = keysDirty ? ak.trimmingCharacters(in: .whitespaces) : nil
-        let newSK: String? = keysDirty ? sk.trimmingCharacters(in: .whitespaces) : nil
+        let snapshot = currentSnapshot
+        let credentialsChanged = baseline.map { $0.ak != snapshot.ak || $0.sk != snapshot.sk } ?? false
+        let newAK: String? = credentialsChanged ? snapshot.ak : nil
+        let newSK: String? = credentialsChanged ? snapshot.sk : nil
         do {
-            try model.updateAccount(id: account.id, alias: aliasT, ak: newAK, sk: newSK,
+            try model.updateAccount(id: account.id, alias: snapshot.alias, ak: newAK, sk: newSK,
                                     accountFullID: account.accountFullID,
-                                    enableAgentPlan: enableAgentPlan,
-                                    enableSpeech: enableSpeech, speechApps: apps)
-            keysDirty = false
+                                    enableAgentPlan: snapshot.enableAgentPlan,
+                                    enableSpeech: snapshot.enableSpeech, speechApps: snapshot.speechApps)
+            baseline = snapshot
             withAnimation { savedTick = true }
             onDirtyChange(false)
             Task {
@@ -802,6 +792,32 @@ struct SpeechAppDraft: Identifiable {
     var label: String
     init(id: String = UUID().uuidString, appID: String = "", label: String = "") {
         self.id = id; self.appID = appID; self.label = label
+    }
+}
+
+/// 账号编辑器中真正会被持久化的值。脏状态比较草稿与加载完成后的基线，
+/// 不依赖 TextField 的 onChange 是否由用户输入触发。
+struct AccountEditSnapshot: Equatable {
+    let alias: String
+    let ak: String
+    let sk: String
+    let enableAgentPlan: Bool
+    let enableSpeech: Bool
+    let speechApps: [SpeechApp]
+
+    init(alias: String, ak: String, sk: String,
+         enableAgentPlan: Bool, enableSpeech: Bool, speechApps: [SpeechAppDraft]) {
+        self.alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ak = ak.trimmingCharacters(in: .whitespaces)
+        self.sk = sk.trimmingCharacters(in: .whitespaces)
+        self.enableAgentPlan = enableAgentPlan
+        self.enableSpeech = enableSpeech
+        self.speechApps = speechApps.compactMap { draft in
+            let appID = draft.appID.trimmingCharacters(in: .whitespaces)
+            guard !appID.isEmpty else { return nil }
+            return SpeechApp(id: draft.id, appID: appID,
+                             label: draft.label.trimmingCharacters(in: .whitespaces))
+        }
     }
 }
 

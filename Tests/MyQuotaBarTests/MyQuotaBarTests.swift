@@ -218,6 +218,24 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertTrue(back.enableSpeech)
     }
 
+    // MARK: - 设置草稿脏状态
+
+    func testAccountEditSnapshotDoesNotTreatLoadedFieldsAsChanges() {
+        let apps = [SpeechAppDraft(id: "s1", appID: "123", label: "应用A")]
+        let baseline = AccountEditSnapshot(alias: "测试", ak: "ak", sk: "sk",
+                                           enableAgentPlan: true, enableSpeech: true,
+                                           speechApps: apps)
+        let loadedDraft = AccountEditSnapshot(alias: "测试", ak: "ak", sk: "sk",
+                                              enableAgentPlan: true, enableSpeech: true,
+                                              speechApps: apps)
+        XCTAssertEqual(loadedDraft, baseline)
+
+        let editedDraft = AccountEditSnapshot(alias: "另一个名称", ak: "ak", sk: "sk",
+                                              enableAgentPlan: true, enableSpeech: true,
+                                              speechApps: apps)
+        XCTAssertNotEqual(editedDraft, baseline)
+    }
+
     // MARK: - 重置倒计时文案（分/时/天边界 + 过去时间）
 
     func testRelativeReset() {

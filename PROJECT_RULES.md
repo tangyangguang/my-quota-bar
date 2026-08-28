@@ -136,7 +136,7 @@ my-quota-bar/
 │       ├── SpeechCardView.swift    # 语音展示卡片
 │       └── SettingsWindow.swift    # 设置窗口（账号主从布局 + 显示 Tab）
 ├── Tests/MyQuotaBarTests/
-│   └── MyQuotaBarTests.swift       # 单测（20 个）
+│   └── MyQuotaBarTests.swift       # 单测（21 个）
 ├── pics/                           # 截图（gitignore，含敏感信息）
 └── outputs/                        # 构建产物 .app（gitignore）
 ```
