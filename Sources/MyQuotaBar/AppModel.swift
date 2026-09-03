@@ -58,6 +58,18 @@ final class AppModel {
         scheduleNextRefresh()
     }
 
+    /// 统一刷新间隔（设置页只暴露一个）：写入所有源。
+    var globalRefreshInterval: Int { interval(for: .agentPlan) }
+
+    func setGlobalRefreshInterval(_ seconds: Int) {
+        for source in RefreshSource.allCases {
+            refreshIntervals[source.rawValue] = seconds
+            AppSettings.setRefreshInterval(seconds, for: source.rawValue)
+            nextAttemptAt[source] = Date().addingTimeInterval(TimeInterval(seconds))
+        }
+        scheduleNextRefresh()
+    }
+
     init() {
         selectedMetricID = AppSettings.selectedMetricID
         for source in RefreshSource.allCases {
@@ -98,22 +110,26 @@ final class AppModel {
                                 secretAccessKey: sk.trimmingCharacters(in: .whitespaces)).test()
     }
 
-    /// 测试某语音应用（用传入的 AK/SK + AppID）。
-    func testSpeechApp(ak: String, sk: String, appID: String) async -> (ok: Bool, message: String) {
+    /// 测试某语音应用（用传入的 AK/SK + AppID），只验证开启的子服务。
+    func testSpeechApp(ak: String, sk: String, appID: String,
+                       includeASR: Bool, includeTTS: Bool) async -> (ok: Bool, message: String) {
         guard let id = Int(appID.trimmingCharacters(in: .whitespaces)), id > 0 else {
             return (false, "AppID 需为数字")
         }
         return await SpeechProvider(accessKeyID: ak.trimmingCharacters(in: .whitespaces),
                                     secretAccessKey: sk.trimmingCharacters(in: .whitespaces),
-                                    appID: id).test()
+                                    appID: id)
+            .test(.init(includeASR: includeASR, includeTTS: includeTTS))
     }
 
     /// 新增账号。持久化配置 + 凭证，然后刷新。返回新账号 ID。
     @discardableResult
     func addAccount(platform: Platform = .volcengine, alias: String, ak: String, sk: String,
-                    accountFullID: String?, enableAgentPlan: Bool, speechApps: [SpeechApp]) throws -> String {
+                    accountFullID: String?, iamIdentity: String? = nil,
+                    enableAgentPlan: Bool, speechApps: [SpeechApp]) throws -> String {
         let config = AccountConfig(platform: platform, alias: alias, accountFullID: accountFullID,
-                                   enableAgentPlan: enableAgentPlan, speechApps: speechApps)
+                                   enableAgentPlan: enableAgentPlan, speechApps: speechApps,
+                                   iamIdentity: iamIdentity)
         try AccountStore.setCredentials(ak: ak, sk: sk, for: config.id)
         let updated = accountConfigs + [config]
         do {
@@ -131,28 +147,73 @@ final class AppModel {
         return config.id
     }
 
-    /// 更新已有账号。ak/sk 传空表示不改动原凭证。
-    func updateAccount(id: String, alias: String, ak: String?, sk: String?, accountFullID: String?,
-                       enableAgentPlan: Bool, enableSpeech: Bool, speechApps: [SpeechApp]) throws {
-        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
-        var updated = accountConfigs
-        updated[idx].alias = alias
-        updated[idx].enableAgentPlan = enableAgentPlan
-        updated[idx].enableSpeech = enableSpeech
-        updated[idx].speechApps = speechApps
-        if let full = accountFullID { updated[idx].accountFullID = full }
-        if let ak = ak, let sk = sk {
-            try AccountStore.setCredentials(ak: ak, sk: sk, for: id)
+    // MARK: 即时生效的账号编辑（设置页改了立即落盘 + 刷新，无需“保存”按钮）
+
+    /// 持久化当前账号配置；失败时记录到 persistenceError（侧边栏顶部警告条展示）。
+    @discardableResult
+    private func persistConfigs() -> Bool {
+        do {
+            try AccountStore.save(accountConfigs)
+            persistenceError = nil
+            configurationWarning = nil
+            return true
+        } catch {
+            persistenceError = error.localizedDescription
+            return false
         }
-        try AccountStore.save(updated)
-        persistenceError = nil
-        configurationWarning = nil
-        accountConfigs = updated
+    }
+
+    /// 改名：只更新配置与面板展示名，不触发网络。
+    func setAlias(id: String, alias: String) {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        accountConfigs[idx].alias = trimmed
+        persistConfigs()
+        if let ai = accounts.firstIndex(where: { $0.id == id }) {
+            accounts[ai].alias = trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    /// 开关 Agent Plan。
+    func setAgentPlanEnabled(id: String, enabled: Bool) {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        accountConfigs[idx].enableAgentPlan = enabled
+        persistConfigs()
+        reconfigureService(for: id)
+    }
+
+    /// 整体替换某账号的语音应用（增删 / AppID / 备注 / ASR·TTS 开关变化后调用）。
+    /// 与现有配置一致时直接跳过，避免无意义的落盘与重拉（如切账号时的同步）。
+    func setSpeechApps(id: String, apps: [SpeechApp]) {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        guard accountConfigs[idx].speechApps != apps else { return }
+        accountConfigs[idx].speechApps = apps
+        persistConfigs()
+        reconfigureService(for: id)
+    }
+
+    /// 更换密钥：弹窗里先测试通过才调用。用测试拿到的最新身份写入；密钥真的变了才重拉。
+    func changeCredentials(id: String, ak: String, sk: String,
+                           accountFullID: String, iamIdentity: String?) throws {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        let trimmedAK = ak.trimmingCharacters(in: .whitespaces)
+        let trimmedSK = sk.trimmingCharacters(in: .whitespaces)
+        let current = credentials(for: id)
+        let changed = current.ak != trimmedAK || current.sk != trimmedSK
+        try AccountStore.setCredentials(ak: trimmedAK, sk: trimmedSK, for: id)
+        accountFullID_[id] = accountFullID
+        accountConfigs[idx].accountFullID = accountFullID
+        accountConfigs[idx].iamIdentity = iamIdentity
+        persistConfigs()
+        if changed { reconfigureService(for: id) }
+    }
+
+    /// 服务配置变化后：提升代数丢弃旧响应，清空该账号展示，按新配置重拉。
+    private func reconfigureService(for id: String) {
+        guard let cfg = accountConfigs.first(where: { $0.id == id }) else { return }
         bumpRevision(for: id)
-        if let full = updated[idx].accountFullID { accountFullID_[id] = full }
-        // 删掉已不存在的展示服务（先清空该账号，重新拉）
         accounts.removeAll { $0.id == id }
-        refreshAccountConfig(updated[idx])
+        refreshAccountConfig(cfg)
     }
 
     /// 删除账号：清凭证、清配置、从面板移除。
@@ -423,7 +484,7 @@ final class AppModel {
                 switch source {
                 case .agentPlan where config.enableAgentPlan:
                     return (config, accountRevisions[config.id, default: 0])
-                case .speech where config.enableSpeech && !config.speechApps.isEmpty:
+                case .speech where config.hasActiveSpeech:
                     return (config, accountRevisions[config.id, default: 0])
                 default:
                     return nil
@@ -491,12 +552,12 @@ final class AppModel {
             if config.enableAgentPlan {
                 anyOK = await fetchAgentPlan(for: config, revision: revision) || anyOK
             }
-            if config.enableSpeech && !config.speechApps.isEmpty {
+            if config.hasActiveSpeech {
                 anyOK = await fetchSpeech(for: config, revision: revision) || anyOK
             }
             guard isCurrent(accountID: config.id, revision: revision) else { return }
-            // 都没启用则移除展示账号
-            if !config.enableAgentPlan && (!config.enableSpeech || config.speechApps.isEmpty) {
+            // 没有任何启用的服务则移除展示账号
+            if !config.hasAnyService {
                 accounts.removeAll { $0.id == config.id }
             }
             if anyOK { lastRefreshAt = Date() }
@@ -554,7 +615,7 @@ final class AppModel {
         guard config.platform == .volcengine else { return false }
         let ak = AccountStore.accessKeyID(for: config.id)
         let sk = AccountStore.secretAccessKey(for: config.id)
-        guard !ak.isEmpty, !sk.isEmpty, config.enableSpeech, !config.speechApps.isEmpty else { return false }
+        guard !ak.isEmpty, !sk.isEmpty, config.hasActiveSpeech else { return false }
         await ensureAccountID(config, ak: ak, sk: sk, revision: revision)
         guard isCurrent(accountID: config.id, revision: revision) else { return false }
         let now = Date()
@@ -564,11 +625,15 @@ final class AppModel {
         var anyOK = false
 
         for app in config.speechApps {
-            guard let appID = Int(app.appID), appID > 0 else { continue }
+            guard let appID = Int(app.appID.trimmingCharacters(in: .whitespaces)), appID > 0 else { continue }
+            let options = SpeechProvider.Options(includeASR: app.enableASR, includeTTS: app.enableTTS)
+            // 两个子服务都关了：不请求、不出卡。
+            guard options.includeASR || options.includeTTS else { continue }
             let provider = SpeechProvider(accessKeyID: ak, secretAccessKey: sk, appID: appID)
-            let outcome = await provider.fetchOutcome()
-            // 只要至少一个分项请求未报错，就算本应用成功联系到服务端。
-            if outcome.errors.count < 2 { anyOK = true }
+            let outcome = await provider.fetchOutcome(options)
+            // 只要至少一个已查询分项请求未报错，就算本应用成功联系到服务端。
+            let queried = (options.includeASR ? 1 : 0) + (options.includeTTS ? 1 : 0)
+            if !outcome.packs.isEmpty || outcome.errors.count < queried { anyOK = true }
 
             let showPrefix = config.speechApps.count > 1
                 || !app.label.trimmingCharacters(in: .whitespaces).isEmpty

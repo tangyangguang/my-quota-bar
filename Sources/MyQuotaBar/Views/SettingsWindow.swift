@@ -1,7 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// 独立设置窗口：账号管理（增删改）+ 显示设置。
+/// 独立设置窗口：账号管理（增删改）+ 通用设置。
+///
+/// 交互范式：**改了立即生效**（macOS 系统设置风格）——
+/// 改名、拨服务开关、增删语音应用、更换密钥都直接落盘并刷新面板，
+/// 没有“保存”按钮、没有草稿、没有未保存拦截。
+/// 唯一的例外是“更换密钥”：在弹窗里先测试通过才写入（敏感操作先验证）。
 struct SettingsWindow: View {
     @Bindable var model: AppModel
 
@@ -9,10 +14,10 @@ struct SettingsWindow: View {
         TabView {
             AccountsTab(model: model)
                 .tabItem { Label("账号", systemImage: "person.2") }
-            DisplayTab(model: model)
-                .tabItem { Label("显示", systemImage: "menubar.rectangle") }
+            GeneralTab(model: model)
+                .tabItem { Label("通用", systemImage: "gearshape") }
         }
-        .frame(width: 720, height: 560)
+        .frame(width: 720, height: 520)
     }
 }
 
@@ -24,10 +29,6 @@ struct AccountsTab: View {
     @State private var addingNew = false
     @State private var deleteTarget: AccountConfig?
     @State private var operationError: String?
-    @State private var detailDirty = false
-    @State private var pendingSelectionID: String?
-    @State private var showUnsavedPrompt = false
-    @State private var saveRequest = 0
 
     private var selected: AccountConfig? {
         model.accountConfigs.first { $0.id == selectedID }
@@ -43,21 +44,6 @@ struct AccountsTab: View {
         }
     }
 
-    private var selection: Binding<String?> {
-        Binding(
-            get: { selectedID },
-            set: { newValue in
-                guard newValue != selectedID else { return }
-                if detailDirty {
-                    pendingSelectionID = newValue
-                    showUnsavedPrompt = true
-                } else {
-                    selectedID = newValue
-                }
-            }
-        )
-    }
-
     var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -66,18 +52,6 @@ struct AccountsTab: View {
         }
         .sheet(isPresented: $addingNew) {
             AddAccountSheet(model: model) { newID in selectedID = newID }
-        }
-        .confirmationDialog("有尚未保存的修改", isPresented: $showUnsavedPrompt,
-                            titleVisibility: .visible) {
-            Button("保存并切换") { saveRequest += 1 }
-            Button("不保存并切换", role: .destructive) {
-                detailDirty = false
-                selectedID = pendingSelectionID
-                pendingSelectionID = nil
-            }
-            Button("取消", role: .cancel) { pendingSelectionID = nil }
-        } message: {
-            Text("当前账号的修改尚未保存。")
         }
         .confirmationDialog(
             "确定删除该账号？",
@@ -118,7 +92,7 @@ struct AccountsTab: View {
                     .padding(8)
                 Divider()
             }
-            List(selection: selection) {
+            List(selection: $selectedID) {
                 ForEach(groupedAccounts, id: \.platform) { group in
                     Section(group.platform.displayName) {
                         ForEach(group.accounts) { config in
@@ -184,20 +158,8 @@ struct AccountsTab: View {
     @ViewBuilder
     private var detail: some View {
         if let config = selected {
-            AccountDetailView(
-                model: model,
-                account: config,
-                saveRequest: saveRequest,
-                onDirtyChange: { detailDirty = $0 },
-                onSaveSucceeded: {
-                    detailDirty = false
-                    if let pending = pendingSelectionID {
-                        pendingSelectionID = nil
-                        selectedID = pending
-                    }
-                }
-            )
-            .id(config.id)   // 换账号时重建，重新 load
+            AccountDetailView(model: model, account: config)
+                .id(config.id)   // 换账号时重建，重新 load
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "person.crop.circle.badge.plus")
@@ -205,7 +167,7 @@ struct AccountsTab: View {
                 Text(model.accountConfigs.isEmpty ? "还没有账号" : "选择左侧账号进行管理")
                     .font(.title3)
                 if model.accountConfigs.isEmpty {
-                    Text("点左下角「+」添加账号：填入 AK/SK 测试连接即可。\n添加后在这里配置 Agent Plan、语音等服务。\n无需安装任何命令行工具。")
+                    Text("点左下角「+」添加账号：填入 AK/SK 测试连接即可。\n添加后在这里打开 Agent Plan、语音等服务开关，立即生效。\n无需安装任何命令行工具。")
                         .font(.caption).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
@@ -236,7 +198,8 @@ struct AccountRow: View {
     private var serviceSummary: String {
         var parts: [String] = []
         if config.enableAgentPlan { parts.append("Agent Plan") }
-        if config.enableSpeech { parts.append("语音 ×\(config.speechApps.count)") }
+        let activeSpeech = config.speechApps.filter { $0.isActive }.count
+        if activeSpeech > 0 { parts.append("语音 ×\(activeSpeech)") }
         return parts.isEmpty ? "未配置服务" : parts.joined(separator: " · ")
     }
 }
@@ -253,6 +216,7 @@ struct AddAccountSheet: View {
     @State private var sk = ""
     @State private var credState = TestState.idle
     @State private var accountFullID: String?
+    @State private var iamIdentity: String?
     @State private var fetchedName: String?
     @State private var alias = ""
     @State private var saveError: String?
@@ -279,10 +243,12 @@ struct AddAccountSheet: View {
                 }
 
                 GroupBox {
-                    VStack(alignment: .leading, spacing: 8) {
-                        RevealableField(title: "Access Key ID", text: $ak)
+                    VStack(alignment: .leading, spacing: 10) {
+                        LabeledSecretField(label: "Access Key ID（AK）",
+                                           placeholder: "Access Key ID", text: $ak)
                             .onChange(of: ak) { resetCred() }
-                        RevealableField(title: "Secret Access Key", text: $sk)
+                        LabeledSecretField(label: "Secret Access Key（SK）",
+                                           placeholder: "Secret Access Key", text: $sk)
                             .onChange(of: sk) { resetCred() }
                         HStack(spacing: 8) {
                             Button {
@@ -355,6 +321,7 @@ struct AddAccountSheet: View {
     private func resetCred() {
         credState = .idle
         accountFullID = nil
+        iamIdentity = nil
         fetchedName = nil
     }
 
@@ -363,6 +330,7 @@ struct AddAccountSheet: View {
         let r = await model.testCredentials(platform: platform, ak: ak, sk: sk)
         if r.ok, let identity = r.identity {
             accountFullID = identity.accountID
+            iamIdentity = identity.iamIdentity
             fetchedName = identity.suggestedAccountName
             credState = .success(r.message)
             if alias.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -381,6 +349,7 @@ struct AddAccountSheet: View {
                 ak: ak.trimmingCharacters(in: .whitespaces),
                 sk: sk.trimmingCharacters(in: .whitespaces),
                 accountFullID: accountFullID,
+                iamIdentity: iamIdentity,
                 enableAgentPlan: false, speechApps: [])
             onAdded(newID)
             dismiss()
@@ -390,101 +359,171 @@ struct AddAccountSheet: View {
     }
 }
 
-// MARK: - 账号详情（右侧）：上「账号信息」+ 下「服务」，两区块独立
+// MARK: - 更换密钥弹窗（敏感操作：先测试通过才允许保存）
 
-struct AccountDetailView: View {
-    enum Page: String, CaseIterable {
-        case account = "账号信息"
-        case services = "服务管理"
-    }
-
+struct ChangeCredentialsSheet: View {
     @Bindable var model: AppModel
-    let account: AccountConfig
-    let saveRequest: Int
-    let onDirtyChange: (Bool) -> Void
-    let onSaveSucceeded: () -> Void
+    let accountID: String
+    let platform: Platform
+    var onSaved: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
 
-    @State private var page: Page = .account
-
-    // 账号信息
-    @State private var alias = ""
     @State private var ak = ""
     @State private var sk = ""
-    @State private var credState = TestState.idle
+    @State private var state = TestState.idle
+    @State private var verified = false
+    @State private var verifiedAccountID = ""
+    @State private var verifiedIdentity: String?
+    @State private var error: String?
 
-    // 服务
-    @State private var enableAgentPlan = false
-    @State private var agentTestState = TestState.idle
-    @State private var enableSpeech = false
-    @State private var speechApps: [SpeechAppDraft] = []
-
-    @State private var baseline: AccountEditSnapshot?
-    @State private var savedTick = false   // 保存后短暂显示“已保存”
-    @State private var saveError: String?
+    private var canTest: Bool {
+        !ak.trimmingCharacters(in: .whitespaces).isEmpty
+            && !sk.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(account.alias.isEmpty ? "未命名账号" : account.alias)
-                            .font(.headline)
-                        Text(account.platform.displayName)
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Picker("", selection: $page) {
-                        ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 230)
-                }
-            }
-            .padding(.horizontal, 20).padding(.vertical, 12)
+            Text("更换密钥").font(.headline).padding(.top, 16)
 
-            Divider()
-            ScrollView {
-                Group {
-                    if !account.platform.isSupported {
-                        unsupportedPlatformView
-                    } else if page == .account {
-                        accountInfoSection
-                    } else {
-                        servicesSection
+            VStack(alignment: .leading, spacing: 14) {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        LabeledSecretField(label: "Access Key ID（AK）",
+                                           placeholder: "Access Key ID", text: $ak)
+                            .onChange(of: ak) { invalidate() }
+                        LabeledSecretField(label: "Secret Access Key（SK）",
+                                           placeholder: "Secret Access Key", text: $sk)
+                            .onChange(of: sk) { invalidate() }
+                        HStack(spacing: 8) {
+                            Button {
+                                Task { await testCredentials() }
+                            } label: {
+                                if case .testing = state {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Text("测试连接")
+                                }
+                            }
+                            .disabled(!canTest || state.isTesting)
+                            stateLabel(state)
+                        }
+                        Text("填入新的 AK/SK，先点「测试连接」，通过后才能保存。加密存入 macOS 钥匙串。")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
+                } label: {
+                    Label("新的火山引擎密钥（AK / SK）", systemImage: "key")
                 }
-                .padding(20)
             }
+            .padding(16)
 
             Divider()
             HStack {
-                if savedTick {
-                    Label("已保存", systemImage: "checkmark.circle.fill")
-                        .font(.caption).foregroundStyle(.green)
-                        .transition(.opacity)
-                }
                 Spacer()
-                Button(page == .account ? "保存账号信息" : "保存服务配置") {
-                    if save() { onSaveSucceeded() }
-                }
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存密钥") { save() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!dirty || !account.platform.isSupported)
+                    .disabled(!verified)
             }
             .padding(12)
         }
-        .background(WindowCloseGuard(hasUnsavedChanges: dirty, save: save))
-        .onAppear(perform: load)
-        .onChange(of: dirty) { _, value in onDirtyChange(value) }
-        .onChange(of: saveRequest) {
-            if save() { onSaveSucceeded() }
+        .frame(width: 460, height: 340)
+        .onAppear {
+            let cred = model.credentials(for: accountID)
+            ak = cred.ak
+            sk = cred.sk
         }
-        .alert("保存失败", isPresented: errorBinding($saveError)) {
-            Button("好") { saveError = nil }
+        .alert("保存密钥失败", isPresented: errorBinding($error)) {
+            Button("好") { error = nil }
         } message: {
-            Text(saveError ?? "未知错误")
+            Text(error ?? "未知错误")
         }
+    }
+
+    @ViewBuilder
+    private func stateLabel(_ s: TestState) -> some View {
+        switch s {
+        case .idle, .testing: EmptyView()
+        case .success(let msg):
+            Label(msg, systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundStyle(.green).lineLimit(2)
+        case .failure(let msg):
+            Label(msg, systemImage: "xmark.circle.fill")
+                .font(.caption).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    private func invalidate() {
+        state = .idle
+        verified = false
+        verifiedAccountID = ""
+        verifiedIdentity = nil
+    }
+
+    private func testCredentials() async {
+        state = .testing
+        let r = await model.testCredentials(platform: platform, ak: ak, sk: sk)
+        if r.ok, let identity = r.identity {
+            state = .success(r.message)
+            verified = true
+            verifiedAccountID = identity.accountID
+            verifiedIdentity = identity.iamIdentity
+        } else {
+            state = .failure(r.message)
+            verified = false
+        }
+    }
+
+    private func save() {
+        do {
+            try model.changeCredentials(
+                id: accountID,
+                ak: ak.trimmingCharacters(in: .whitespaces),
+                sk: sk.trimmingCharacters(in: .whitespaces),
+                accountFullID: verifiedAccountID,
+                iamIdentity: verifiedIdentity
+            )
+            onSaved()
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 账号详情（右侧）：「账号 / 套餐 / 语音」三个平级分组，改了立即生效
+
+struct AccountDetailView: View {
+    @Bindable var model: AppModel
+    let account: AccountConfig
+
+    @State private var speechApps: [SpeechAppDraft] = []
+    @State private var agentTestState = TestState.idle
+    @State private var showCredSheet = false
+    // 更换密钥成功后 +1，用于强制重建服务行、清掉旧的测试结果。
+    @State private var serviceEpoch = 0
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                accountGroup
+                if account.platform.isSupported {
+                    planGroup
+                    speechGroup.id(serviceEpoch)
+                } else {
+                    unsupportedPlatformView
+                }
+            }
+            .padding(20)
+        }
+        .sheet(isPresented: $showCredSheet) {
+            ChangeCredentialsSheet(model: model, accountID: account.id, platform: account.platform) {
+                agentTestState = .idle
+                serviceEpoch += 1
+            }
+        }
+        .onAppear(perform: load)
+        .onDisappear(perform: syncSpeechApps)
     }
 
     private var unsupportedPlatformView: some View {
@@ -496,142 +535,166 @@ struct AccountDetailView: View {
         .frame(maxWidth: .infinity, minHeight: 300)
     }
 
-    // MARK: 账号信息
+    // MARK: 账号分组
 
-    private var accountInfoSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("账号信息", systemImage: "person.text.rectangle")
+    private var accountGroup: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("账号", systemImage: "person.text.rectangle")
 
-            LabeledContent("平台") {
-                Text(account.platform.displayName).foregroundStyle(.secondary)
-            }
-            LabeledContent("名称") {
-                TextField("显示在面板上", text: $alias)
-                    .textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-            }
-            if let full = account.accountFullID {
-                LabeledContent("账号 ID") {
-                    Text(full).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-            }
-
-            Divider().padding(.vertical, 2)
-
-            LabeledContent("Access Key") {
-                RevealableField(title: "Access Key ID", text: $ak)
-                    .onChange(of: ak) { credState = .idle }
-                    .frame(maxWidth: 260)
-            }
-            LabeledContent("Secret Key") {
-                RevealableField(title: "Secret Access Key", text: $sk)
-                    .onChange(of: sk) { credState = .idle }
-                    .frame(maxWidth: 260)
-            }
-            HStack(spacing: 8) {
-                Button {
-                    Task { await testCredentials() }
-                } label: {
-                    if case .testing = credState {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("测试连接")
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    // 行 1：名称（可改） + 更换密钥
+                    HStack(spacing: 10) {
+                        Text("名称").font(.caption).foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .leading)
+                        TextField("显示在面板上，可改成好认的名字", text: aliasBinding)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            showCredSheet = true
+                        } label: {
+                            Label("更换密钥…", systemImage: "key")
+                        }
+                        .controlSize(.small)
+                    }
+                    // 行 2：平台 · 身份 · 账号 ID（紧凑一行，可复制）
+                    HStack(spacing: 8) {
+                        Text("账号").font(.caption).foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .leading)
+                        Text(identityLine)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        if account.accountFullID != nil {
+                            Button {
+                                copyAccountID()
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless).controlSize(.small)
+                            .foregroundStyle(.secondary)
+                            .help("复制账号 ID")
+                        }
+                        Spacer()
                     }
                 }
-                .disabled(ak.isEmpty || sk.isEmpty || credState.isTesting)
-                stateLabel(credState)
+                .padding(6)
             }
         }
     }
 
-    // MARK: 服务
+    /// 紧凑身份行：平台 · 主账号/子用户 · 账号 ID。
+    private var identityLine: String {
+        var parts: [String] = [account.platform.displayName]
+        if let badge = account.identityBadge { parts.append(badge) }
+        if let full = account.accountFullID { parts.append("ID \(full)") }
+        return parts.joined(separator: " · ")
+    }
 
-    private var servicesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("服务", systemImage: "square.stack.3d.up")
+    private func copyAccountID() {
+        guard let id = account.accountFullID else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(id, forType: .string)
+    }
 
-            // Agent Plan（圆角卡片，与语音应用同级）
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
+    private var aliasBinding: Binding<String> {
+        Binding(
+            get: { account.alias },
+            set: { model.setAlias(id: account.id, alias: $0) }
+        )
+    }
+
+    // MARK: 套餐分组（订阅套餐类服务；现在是 Agent Plan，以后有别的套餐加这里）
+
+    private var planGroup: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("套餐", systemImage: "creditcard")
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
                     Image(systemName: "a.circle.fill").foregroundStyle(.secondary)
-                    Text("Agent Plan")
-                        .font(.system(size: 12, weight: .semibold))
+                    Text("Agent Plan").font(.system(size: 12, weight: .semibold))
                     Spacer()
-                    Toggle("", isOn: $enableAgentPlan).labelsHidden()
-                }
-                Text("套餐额度：5 小时 / 每周 / 每月")
-                    .font(.caption2).foregroundStyle(.secondary)
-                if enableAgentPlan {
-                    HStack(spacing: 8) {
-                        Button {
-                            Task { await testAgentPlan() }
-                        } label: {
-                            if case .testing = agentTestState {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Label("测试", systemImage: "bolt.horizontal")
-                            }
-                        }
-                        .controlSize(.small)
-                        .disabled(agentTestState.isTesting)
-                        stateLabel(agentTestState)
-                    }
-                }
-            }
-            .modifier(ServiceCardStyle())
-
-            // 语音服务与 Agent Plan 同级；AppID 是它内部的服务实例。
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Image(systemName: "waveform.circle.fill").foregroundStyle(.secondary)
-                    Text("语音服务")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    Toggle("", isOn: $enableSpeech).labelsHidden()
-                }
-                Text("ASR / TTS 资源包；每个 AppID 独立统计额度")
-                    .font(.caption2).foregroundStyle(.secondary)
-
-                if enableSpeech {
-                    if speechApps.isEmpty {
-                        Text("尚未配置应用，请添加至少一个 AppID。")
-                            .font(.caption2).foregroundStyle(.orange)
-                    }
-                    ForEach($speechApps) { $app in
-                        SpeechAppRow(app: $app, model: model, ak: currentAK, sk: currentSK,
-                                     onDelete: { speechApps.removeAll { $0.id == app.id } })
-                    }
+                    // 测试按钮常显（开关未开也能先验证），与语音应用卡的测试按钮同在右侧。
                     Button {
-                        if speechApps.count < 10 { speechApps.append(SpeechAppDraft()) }
+                        Task { await testAgentPlan() }
                     } label: {
-                        Label("添加语音应用", systemImage: "plus")
+                        if case .testing = agentTestState {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label("测试", systemImage: "bolt.horizontal")
+                        }
                     }
-                    .disabled(speechApps.count >= 10)
-                    if speechApps.count >= 10 {
-                        Text("最多 10 个语音应用").font(.caption2).foregroundStyle(.tertiary)
-                    }
+                    .controlSize(.small)
+                    .disabled(agentTestState.isTesting)
+                    Toggle("", isOn: agentPlanBinding).labelsHidden()
+                }
+                HStack(spacing: 8) {
+                    Text("套餐额度：5 小时 / 每周 / 每月")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    CompactTestStateLabel(state: agentTestState)
                 }
             }
             .modifier(ServiceCardStyle())
         }
+    }
+
+    // MARK: 语音分组（语音应用与 Agent Plan 同级；每个应用内 ASR / TTS 独立开关）
+
+    private var speechGroup: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionHeader("语音", systemImage: "waveform")
+                Spacer()
+                Button {
+                    if speechApps.count < 10 { speechApps.append(SpeechAppDraft()) }
+                } label: {
+                    Label("添加应用", systemImage: "plus")
+                }
+                .controlSize(.small)
+                .disabled(speechApps.count >= 10)
+                .help(speechApps.count >= 10 ? "最多 10 个语音应用" : "添加一个语音应用（AppID）")
+            }
+
+            if speechApps.isEmpty {
+                Text("还没有语音应用。点右上角「添加应用」填入 AppID；ASR / TTS 可分别开关。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.secondary.opacity(0.25),
+                                          style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    )
+            } else {
+                VStack(spacing: 8) {
+                    ForEach($speechApps) { $app in
+                        SpeechAppRow(
+                            app: $app,
+                            model: model,
+                            ak: currentCreds.ak,
+                            sk: currentCreds.sk,
+                            onCommit: syncSpeechApps,
+                            onDelete: {
+                                speechApps.removeAll { $0.id == app.id }
+                                syncSpeechApps()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var agentPlanBinding: Binding<Bool> {
+        Binding(get: { account.enableAgentPlan },
+                set: { model.setAgentPlanEnabled(id: account.id, enabled: $0) })
+    }
+
+    private var currentCreds: (ak: String, sk: String) {
+        model.credentials(for: account.id)
     }
 
     // MARK: 辅助
-
-    private var currentAK: String { ak }
-    private var currentSK: String { sk }
-
-    /// 是否有未保存的有效修改。基线只在所有字段加载完成后建立，避免初始化过程中
-    /// SwiftUI 逐个更新 @State 时把中间状态误报成用户编辑。
-    private var dirty: Bool {
-        guard let baseline else { return false }
-        return currentSnapshot != baseline
-    }
-
-    private var currentSnapshot: AccountEditSnapshot {
-        AccountEditSnapshot(alias: alias, ak: ak, sk: sk,
-                            enableAgentPlan: enableAgentPlan, enableSpeech: enableSpeech,
-                            speechApps: speechApps)
-    }
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
@@ -639,67 +702,33 @@ struct AccountDetailView: View {
             .foregroundStyle(.primary)
     }
 
-    @ViewBuilder
-    private func stateLabel(_ state: TestState) -> some View {
-        switch state {
-        case .idle, .testing: EmptyView()
-        case .success(let msg):
-            Label(msg, systemImage: "checkmark.circle.fill")
-                .font(.caption).foregroundStyle(.green).lineLimit(2)
-        case .failure(let msg):
-            Label(msg, systemImage: "xmark.circle.fill")
-                .font(.caption).foregroundStyle(.red).lineLimit(2)
-        }
-    }
-
-    private func testCredentials() async {
-        credState = .testing
-        let r = await model.testCredentials(platform: account.platform, ak: ak, sk: sk)
-        credState = r.ok ? .success(r.message) : .failure(r.message)
-    }
-
     private func testAgentPlan() async {
         agentTestState = .testing
-        let r = await model.testAgentPlan(ak: currentAK, sk: currentSK)
+        let cred = model.credentials(for: account.id)
+        let r = await model.testAgentPlan(ak: cred.ak, sk: cred.sk)
         agentTestState = r.ok ? .success(r.message) : .failure(r.message)
     }
 
     private func load() {
-        guard baseline == nil else { return }
-        alias = account.alias
-        enableAgentPlan = account.enableAgentPlan
-        enableSpeech = account.enableSpeech
-        speechApps = account.speechApps.map { SpeechAppDraft(id: $0.id, appID: $0.appID, label: $0.label) }
-        let cred = model.credentials(for: account.id)
-        ak = cred.ak
-        sk = cred.sk
-        baseline = currentSnapshot
+        speechApps = account.speechApps.map {
+            SpeechAppDraft(id: $0.id, appID: $0.appID, label: $0.label,
+                           enableASR: $0.enableASR, enableTTS: $0.enableTTS)
+        }
     }
 
-    @discardableResult
-    private func save() -> Bool {
-        guard dirty else { return true }
-        let snapshot = currentSnapshot
-        let credentialsChanged = baseline.map { $0.ak != snapshot.ak || $0.sk != snapshot.sk } ?? false
-        let newAK: String? = credentialsChanged ? snapshot.ak : nil
-        let newSK: String? = credentialsChanged ? snapshot.sk : nil
-        do {
-            try model.updateAccount(id: account.id, alias: snapshot.alias, ak: newAK, sk: newSK,
-                                    accountFullID: account.accountFullID,
-                                    enableAgentPlan: snapshot.enableAgentPlan,
-                                    enableSpeech: snapshot.enableSpeech, speechApps: snapshot.speechApps)
-            baseline = snapshot
-            withAnimation { savedTick = true }
-            onDirtyChange(false)
-            Task {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                await MainActor.run { withAnimation { savedTick = false } }
-            }
-            return true
-        } catch {
-            saveError = error.localizedDescription
-            return false
+    /// 把本地草稿里“AppID 有效”的应用同步到 model（立即落盘 + 刷新）。
+    /// AppID 为空/非法的草稿只留在界面上，不入库、不拉数。
+    private func syncSpeechApps() {
+        let valid = speechApps.compactMap { draft -> SpeechApp? in
+            let appID = draft.appID.trimmingCharacters(in: .whitespaces)
+            guard let id = Int(appID), id > 0 else { return nil }
+            return SpeechApp(
+                id: draft.id, appID: appID,
+                label: draft.label.trimmingCharacters(in: .whitespaces),
+                enableASR: draft.enableASR, enableTTS: draft.enableTTS
+            )
         }
+        model.setSpeechApps(id: account.id, apps: valid)
     }
 }
 
@@ -708,50 +737,32 @@ struct SpeechAppRow: View {
     let model: AppModel
     let ak: String
     let sk: String
+    let onCommit: () -> Void
     let onDelete: () -> Void
 
     @State private var state = TestState.idle
 
+    private var appIDValid: Bool {
+        Int(app.appID.trimmingCharacters(in: .whitespaces)).map { $0 > 0 } ?? false
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // 头部：应用标题（备注或 AppID）+ 删除
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            // 行 1：标题 + 测试 + 删除
+            HStack(spacing: 6) {
                 Image(systemName: "waveform.circle.fill")
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 Text(headerTitle)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Spacer()
-                Button(role: .destructive) { onDelete() } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help("删除这个语音应用")
-            }
-
-            // AppID（带标题）
-            VStack(alignment: .leading, spacing: 3) {
-                Text("AppID").font(.caption2).foregroundStyle(.secondary)
-                TextField("必填，如 3910190874", text: $app.appID)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .onChange(of: app.appID) { state = .idle }
-            }
-
-            // 备注（带标题）
-            VStack(alignment: .leading, spacing: 3) {
-                Text("备注（可选）").font(.caption2).foregroundStyle(.secondary)
-                TextField("自己起名方便区分，如 “A 应用”", text: $app.label)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            // 测试行
-            HStack(spacing: 8) {
                 Button {
+                    onCommit()
                     Task {
                         state = .testing
-                        let r = await model.testSpeechApp(ak: ak, sk: sk, appID: app.appID)
+                        let r = await model.testSpeechApp(
+                            ak: ak, sk: sk, appID: app.appID,
+                            includeASR: app.enableASR, includeTTS: app.enableTTS)
                         state = r.ok ? .success(r.message) : .failure(r.message)
                     }
                 } label: {
@@ -762,26 +773,60 @@ struct SpeechAppRow: View {
                     }
                 }
                 .controlSize(.small)
-                .disabled(app.appID.isEmpty || state.isTesting)
-                switch state {
-                case .idle, .testing: EmptyView()
-                case .success(let m):
-                    Label(m, systemImage: "checkmark.circle.fill")
-                        .font(.caption2).foregroundStyle(.green).lineLimit(2)
-                case .failure(let m):
-                    Label(m, systemImage: "xmark.circle.fill")
-                        .font(.caption2).foregroundStyle(.red).lineLimit(2)
+                .disabled(!appIDValid || (!app.enableASR && !app.enableTTS) || state.isTesting)
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .foregroundStyle(.secondary)
+                .help("删除这个语音应用")
+            }
+
+            // 行 2：AppID（窄框）+ 备注（弹性）并排
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 5) {
+                    Text("AppID").font(.caption2).foregroundStyle(.secondary)
+                    TextField("填入语音 AppID", text: $app.appID)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(width: 116)
+                        .onSubmit(onCommit)
+                        .onChange(of: app.appID) { state = .idle }
+                }
+                HStack(spacing: 5) {
+                    Text("备注").font(.caption2).foregroundStyle(.secondary)
+                    TextField("可选，便于区分", text: $app.label)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .onSubmit(onCommit)
                 }
             }
+
+            // 行 3：ASR / TTS 复选框 + 测试状态
+            HStack(spacing: 16) {
+                Toggle("语音识别 ASR", isOn: $app.enableASR)
+                    .toggleStyle(.checkbox)
+                    .onChange(of: app.enableASR) { onCommit() }
+                Toggle("语音合成 TTS", isOn: $app.enableTTS)
+                    .toggleStyle(.checkbox)
+                    .onChange(of: app.enableTTS) { onCommit() }
+                Spacer()
+                if !app.enableASR && !app.enableTTS {
+                    Text("未启用（面板不显示）")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else {
+                    CompactTestStateLabel(state: state)
+                }
+            }
+            .font(.system(size: 12))
         }
-        .modifier(ServiceInstanceCardStyle())
+        .modifier(ServiceCardStyle())
     }
 
     private var headerTitle: String {
         let label = app.label.trimmingCharacters(in: .whitespaces)
-        if !label.isEmpty { return label }
-        let id = app.appID.trimmingCharacters(in: .whitespaces)
-        return id.isEmpty ? "新语音应用" : "应用 \(id)"
+        return label.isEmpty ? "语音应用" : label
     }
 }
 
@@ -790,34 +835,15 @@ struct SpeechAppDraft: Identifiable {
     let id: String
     var appID: String
     var label: String
-    init(id: String = UUID().uuidString, appID: String = "", label: String = "") {
-        self.id = id; self.appID = appID; self.label = label
-    }
-}
-
-/// 账号编辑器中真正会被持久化的值。脏状态比较草稿与加载完成后的基线，
-/// 不依赖 TextField 的 onChange 是否由用户输入触发。
-struct AccountEditSnapshot: Equatable {
-    let alias: String
-    let ak: String
-    let sk: String
-    let enableAgentPlan: Bool
-    let enableSpeech: Bool
-    let speechApps: [SpeechApp]
-
-    init(alias: String, ak: String, sk: String,
-         enableAgentPlan: Bool, enableSpeech: Bool, speechApps: [SpeechAppDraft]) {
-        self.alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.ak = ak.trimmingCharacters(in: .whitespaces)
-        self.sk = sk.trimmingCharacters(in: .whitespaces)
-        self.enableAgentPlan = enableAgentPlan
-        self.enableSpeech = enableSpeech
-        self.speechApps = speechApps.compactMap { draft in
-            let appID = draft.appID.trimmingCharacters(in: .whitespaces)
-            guard !appID.isEmpty else { return nil }
-            return SpeechApp(id: draft.id, appID: appID,
-                             label: draft.label.trimmingCharacters(in: .whitespaces))
-        }
+    var enableASR: Bool
+    var enableTTS: Bool
+    init(id: String = UUID().uuidString, appID: String = "", label: String = "",
+         enableASR: Bool = true, enableTTS: Bool = true) {
+        self.id = id
+        self.appID = appID
+        self.label = label
+        self.enableASR = enableASR
+        self.enableTTS = enableTTS
     }
 }
 
@@ -825,7 +851,7 @@ struct AccountEditSnapshot: Equatable {
 struct ServiceCardStyle: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .padding(10)
+            .padding(8)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(nsColor: .textBackgroundColor).opacity(0.5))
@@ -833,30 +859,6 @@ struct ServiceCardStyle: ViewModifier {
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-            )
-    }
-}
-
-/// 把可选错误文案桥接成 Alert 所需的布尔 Binding。
-private func errorBinding(_ message: Binding<String?>) -> Binding<Bool> {
-    Binding(
-        get: { message.wrappedValue != nil },
-        set: { if !$0 { message.wrappedValue = nil } }
-    )
-}
-
-/// 服务实例使用更轻的内层卡片，体现“服务 → AppID”层级。
-struct ServiceInstanceCardStyle: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(Color.secondary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
             )
     }
 }
@@ -871,74 +873,43 @@ enum TestState {
     var isTesting: Bool { if case .testing = self { return true }; return false }
 }
 
-/// 为普通 SwiftUI Window 补上 staged editing 的关闭保护。
-private struct WindowCloseGuard: NSViewRepresentable {
-    let hasUnsavedChanges: Bool
-    let save: () -> Bool
+/// 紧凑测试状态：只显示「正常 / 失败」，完整消息悬停可见（失败详情在面板卡片上也会显示）。
+struct CompactTestStateLabel: View {
+    let state: TestState
 
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
-    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        context.coordinator.parent = self
-        DispatchQueue.main.async { context.coordinator.attach(to: view.window) }
-    }
-
-    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
-        coordinator.detach()
-    }
-
-    @MainActor
-    final class Coordinator: NSObject, NSWindowDelegate {
-        var parent: WindowCloseGuard
-        weak var window: NSWindow?
-        weak var previousDelegate: NSWindowDelegate?
-
-        init(parent: WindowCloseGuard) { self.parent = parent }
-
-        func attach(to window: NSWindow?) {
-            guard let window, self.window !== window else { return }
-            detach()
-            self.window = window
-            previousDelegate = window.delegate
-            window.delegate = self
+    var body: some View {
+        switch state {
+        case .idle, .testing:
+            EmptyView()
+        case .success(let msg):
+            Label("正常", systemImage: "checkmark.circle.fill")
+                .font(.caption2).foregroundStyle(.green).help(msg)
+        case .failure(let msg):
+            Label("失败", systemImage: "xmark.circle.fill")
+                .font(.caption2).foregroundStyle(.red).help(msg)
         }
-
-        func detach() {
-            if let window, window.delegate === self { window.delegate = previousDelegate }
-            window = nil
-            previousDelegate = nil
-        }
-
-        func windowShouldClose(_ sender: NSWindow) -> Bool {
-            guard parent.hasUnsavedChanges else {
-                return previousDelegate?.windowShouldClose?(sender) ?? true
-            }
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "有尚未保存的修改"
-            alert.informativeText = "关闭设置前是否保存当前账号的修改？"
-            alert.addButton(withTitle: "保存并关闭")
-            alert.addButton(withTitle: "不保存")
-            alert.addButton(withTitle: "取消")
-            switch alert.runModal() {
-            case .alertFirstButtonReturn: return parent.save()
-            case .alertSecondButtonReturn: return true
-            default: return false
-            }
-        }
-
     }
 }
 
-// MARK: - 显示 Tab：菜单栏指标 + 刷新间隔
+/// 把可选错误文案桥接成 Alert 所需的布尔 Binding。
+private func errorBinding(_ message: Binding<String?>) -> Binding<Bool> {
+    Binding(
+        get: { message.wrappedValue != nil },
+        set: { if !$0 { message.wrappedValue = nil } }
+    )
+}
 
-struct DisplayTab: View {
+// MARK: - 通用 Tab：菜单栏指标 + 刷新间隔 + 开机启动 + 版本
+
+struct GeneralTab: View {
     @Bindable var model: AppModel
 
     private let intervals: [(String, Int)] = [
         ("1 分钟", 60), ("2 分钟", 120), ("3 分钟", 180), ("5 分钟", 300), ("10 分钟", 600)
     ]
+
+    @State private var launchOn = LoginItem.isEnabled
+    @State private var launchError: String?
 
     var body: some View {
         Form {
@@ -960,56 +931,90 @@ struct DisplayTab: View {
             }
 
             Section {
-                Picker("Agent Plan", selection: Binding(
-                    get: { model.interval(for: .agentPlan) },
-                    set: { model.setInterval($0, for: .agentPlan) }
-                )) {
-                    ForEach(intervals, id: \.1) { Text($0.0).tag($0.1) }
-                }
-                Picker("语音服务", selection: Binding(
-                    get: { model.interval(for: .speech) },
-                    set: { model.setInterval($0, for: .speech) }
+                Picker("刷新间隔", selection: Binding(
+                    get: { model.globalRefreshInterval },
+                    set: { model.setGlobalRefreshInterval($0) }
                 )) {
                     ForEach(intervals, id: \.1) { Text($0.0).tag($0.1) }
                 }
             } header: {
-                Text("刷新间隔（各服务独立）")
+                Text("刷新")
             } footer: {
                 Text("数据上游有 5–30 分钟延迟，刷新再快数字也不会更早变化。")
                     .font(.caption)
             }
+
+            Section("启动") {
+                Toggle("开机自动启动 My Quota Bar", isOn: launchBinding)
+            }
+
+            Section {
+                LabeledContent("版本") {
+                    Text(Self.appVersion).foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
+        .alert("开机启动设置失败", isPresented: errorBinding($launchError)) {
+            Button("好") { launchError = nil }
+        } message: {
+            Text(launchError ?? "未知错误")
+        }
+    }
+
+    private var launchBinding: Binding<Bool> {
+        Binding(
+            get: { launchOn },
+            set: { newValue in
+                launchOn = newValue
+                do {
+                    try LoginItem.setEnabled(newValue)
+                } catch {
+                    launchError = error.localizedDescription
+                    launchOn = LoginItem.isEnabled
+                }
+            }
+        )
+    }
+
+    private static var appVersion: String {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        return short ?? "—"
     }
 }
 
-// MARK: - 带小眼睛的可显示/隐藏输入框
+// MARK: - 带明确标签和小眼睛的密钥输入框
 
-struct RevealableField: View {
-    let title: String
+struct LabeledSecretField: View {
+    let label: String
+    let placeholder: String
     @Binding var text: String
     @State private var revealed = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Group {
-                if revealed {
-                    TextField(title, text: $text)
-                } else {
-                    SecureField(title, text: $text)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Group {
+                    if revealed {
+                        TextField(placeholder, text: $text)
+                    } else {
+                        SecureField(placeholder, text: $text)
+                    }
                 }
-            }
-            .textFieldStyle(.roundedBorder)
-            .font(.system(size: 12, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
 
-            Button {
-                revealed.toggle()
-            } label: {
-                Image(systemName: revealed ? "eye.slash" : "eye")
-                    .foregroundStyle(.secondary)
+                Button {
+                    revealed.toggle()
+                } label: {
+                    Image(systemName: revealed ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(revealed ? "隐藏" : "显示")
             }
-            .buttonStyle(.plain)
-            .help(revealed ? "隐藏" : "显示")
         }
     }
 }

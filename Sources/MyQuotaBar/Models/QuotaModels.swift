@@ -19,11 +19,6 @@ struct Platform: RawRepresentable, Codable, CaseIterable, Hashable, Sendable {
         }
     }
 
-    static func from(_ raw: String?) -> Platform {
-        guard let raw, !raw.isEmpty else { return .volcengine }
-        return Platform(rawValue: raw)
-    }
-
     init(rawValue: String) { self.rawValue = rawValue }
 
     init(from decoder: Decoder) throws {

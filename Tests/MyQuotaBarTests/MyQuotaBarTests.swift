@@ -145,12 +145,12 @@ final class MyQuotaBarTests: XCTestCase {
             Account(id: "x", platform: "火山引擎", defaultName: def,
                     idTail: tail, fullID: nil, alias: alias, services: [])
         }
-        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: nil).displayName, "火山引擎 · 张三 (…7443)")
-        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "工作号").displayName, "火山引擎 · 工作号 (…7443)")
-        XCTAssertEqual(acc(def: "", tail: "1074", alias: nil).displayName, "火山引擎 · 账号 (…1074)")
+        XCTAssertEqual(acc(def: "张三", tail: "1234", alias: nil).displayName, "火山引擎 · 张三 (…1234)")
+        XCTAssertEqual(acc(def: "张三", tail: "1234", alias: "工作号").displayName, "火山引擎 · 工作号 (…1234)")
+        XCTAssertEqual(acc(def: "", tail: "5678", alias: nil).displayName, "火山引擎 · 账号 (…5678)")
         XCTAssertEqual(acc(def: "张三", tail: nil, alias: nil).displayName, "火山引擎 · 张三")
-        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "").displayName, "火山引擎 · 张三 (…7443)")
-        XCTAssertEqual(acc(def: "张三", tail: "7443", alias: "工作号").accountDisplayName, "工作号 (…7443)")
+        XCTAssertEqual(acc(def: "张三", tail: "1234", alias: "").displayName, "火山引擎 · 张三 (…1234)")
+        XCTAssertEqual(acc(def: "张三", tail: "1234", alias: "工作号").accountDisplayName, "工作号 (…1234)")
     }
 
     func testPlatformRegistry() {
@@ -170,33 +170,10 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(b.effectiveName, "张三")
     }
 
-    // MARK: - 配置持久化防丢失（旧 schema JSON 仍能解析）
-
-    func testAccountConfigDecodesLegacyJSON() throws {
-        // 模拟早期版本存的 JSON：没有 platform 字段
-        let legacy = """
-        {"id":"abc","alias":"主账号","enableAgentPlan":true,"speechApps":[]}
-        """
-        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(legacy.utf8))
-        XCTAssertEqual(config.id, "abc")
-        XCTAssertEqual(config.alias, "主账号")
-        XCTAssertTrue(config.enableAgentPlan)
-        XCTAssertFalse(config.enableSpeech)
-        XCTAssertEqual(config.platform, .volcengine)   // 缺失 platform 回落火山
-    }
-
-    func testLegacySpeechAppsRemainEnabledAfterMigration() throws {
-        let legacy = """
-        {"id":"speech","alias":"语音账号","enableAgentPlan":false,
-         "speechApps":[{"id":"a","appID":"123","label":"A"}]}
-        """
-        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(legacy.utf8))
-        XCTAssertTrue(config.enableSpeech)
-        XCTAssertEqual(config.speechApps.count, 1)
-    }
+    // MARK: - 配置持久化（当前 schema 往返 / 未知字段忽略 / 未知平台保留）
 
     func testAccountConfigDecodesUnknownPlatform() throws {
-        // 未来降级：原样保留本版本不认识的平台，绝不能污染成火山引擎。
+        // 不认识的平台原样保留，绝不能污染成火山引擎。
         let future = """
         {"id":"x","platform":"unknown_platform","alias":"","enableAgentPlan":false,"speechApps":[]}
         """
@@ -208,32 +185,75 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(roundTrip.platform.rawValue, "unknown_platform")
     }
 
+    func testAccountConfigIgnoresLegacyExtraKeys() throws {
+        // 已移除的历史字段（如 enableSpeech）是未知键，合成解码直接忽略，不报错、不丢账号。
+        let old = """
+        {"id":"abc","platform":"volcengine","alias":"主账号","accountFullID":"1234567890",
+         "enableAgentPlan":true,"enableSpeech":true,
+         "speechApps":[{"id":"a","appID":"123","label":"A","enableASR":true,"enableTTS":true}]}
+        """
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(old.utf8))
+        XCTAssertEqual(config.id, "abc")
+        XCTAssertTrue(config.enableAgentPlan)
+        XCTAssertTrue(config.hasActiveSpeech)
+        XCTAssertTrue(config.hasAnyService)
+    }
+
     func testAccountConfigRoundTrip() throws {
         let apps = [SpeechApp(id: "s1", appID: "123", label: "应用A")]
         let orig = AccountConfig(id: "acc1", platform: .volcengine, alias: "测试",
-                                 accountFullID: "2104007443", enableAgentPlan: true, speechApps: apps)
+                                 accountFullID: "1234567890", enableAgentPlan: true, speechApps: apps)
         let data = try JSONEncoder().encode(orig)
         let back = try JSONDecoder().decode(AccountConfig.self, from: data)
         XCTAssertEqual(orig, back)
-        XCTAssertTrue(back.enableSpeech)
+        XCTAssertTrue(back.hasActiveSpeech)
     }
 
-    // MARK: - 设置草稿脏状态
+    // MARK: - 语音应用启用态派生（isActive）与 ASR / TTS 开关
 
-    func testAccountEditSnapshotDoesNotTreatLoadedFieldsAsChanges() {
-        let apps = [SpeechAppDraft(id: "s1", appID: "123", label: "应用A")]
-        let baseline = AccountEditSnapshot(alias: "测试", ak: "ak", sk: "sk",
-                                           enableAgentPlan: true, enableSpeech: true,
-                                           speechApps: apps)
-        let loadedDraft = AccountEditSnapshot(alias: "测试", ak: "ak", sk: "sk",
-                                              enableAgentPlan: true, enableSpeech: true,
-                                              speechApps: apps)
-        XCTAssertEqual(loadedDraft, baseline)
+    func testSpeechAppActiveRequiresValidAppIDAndASubService() {
+        XCTAssertTrue(SpeechApp(id: "s1", appID: "123", label: "A").isActive)   // 有效 AppID + 默认全开
+        XCTAssertFalse(SpeechApp(id: "s2", appID: "", label: "A").isActive)      // 空 AppID
+        XCTAssertFalse(SpeechApp(id: "s3", appID: "abc", label: "A").isActive)   // 非数字
+        XCTAssertFalse(SpeechApp(id: "s4", appID: "0", label: "A").isActive)     // 0
+        XCTAssertFalse(SpeechApp(id: "s5", appID: "456", enableASR: false, enableTTS: false).isActive) // 全关
+        XCTAssertTrue(SpeechApp(id: "s6", appID: "456", enableASR: false, enableTTS: true).isActive)   // 只开 TTS
+    }
 
-        let editedDraft = AccountEditSnapshot(alias: "另一个名称", ak: "ak", sk: "sk",
-                                              enableAgentPlan: true, enableSpeech: true,
-                                              speechApps: apps)
-        XCTAssertNotEqual(editedDraft, baseline)
+    func testSpeechAppRoundTripsASRTTSToggles() throws {
+        let app = SpeechApp(id: "s1", appID: "123", label: "A", enableASR: false, enableTTS: true)
+        let back = try JSONDecoder().decode(SpeechApp.self, from: JSONEncoder().encode(app))
+        XCTAssertEqual(app, back)
+        XCTAssertFalse(back.enableASR)
+        XCTAssertTrue(back.enableTTS)
+        XCTAssertTrue(back.isActive)
+    }
+
+    // MARK: - 身份标记（主账号 / 子用户）
+
+    func testIdentityKindCodeAndBadge() {
+        let root = VolcSigner.Identity(accountID: "1234567890", userName: nil, isRoot: true)
+        XCTAssertEqual(root.kindCode, "root")
+        let user = VolcSigner.Identity(accountID: "2345678901", userName: "小明", isRoot: false)
+        XCTAssertEqual(user.kindCode, "user:小明")
+
+        XCTAssertNil(AccountConfig(id: "a").identityBadge)
+        XCTAssertEqual(AccountConfig(id: "b", iamIdentity: "root").identityBadge, "主账号")
+        XCTAssertEqual(AccountConfig(id: "c", iamIdentity: "user:小明").identityBadge, "子用户 · 小明")
+    }
+
+    func testAccountConfigDerivesSpeechActivity() {
+        let inactiveApp = SpeechApp(id: "a", appID: "123", enableASR: false, enableTTS: false)
+        let noIDApp = SpeechApp(id: "b", appID: "", enableASR: true, enableTTS: true)
+        let activeApp = SpeechApp(id: "c", appID: "456", enableASR: false, enableTTS: true)
+
+        let none = AccountConfig(id: "x", speechApps: [inactiveApp, noIDApp])
+        XCTAssertFalse(none.hasActiveSpeech)
+        XCTAssertFalse(none.hasAnyService)
+
+        let some = AccountConfig(id: "y", enableAgentPlan: true, speechApps: [inactiveApp, activeApp])
+        XCTAssertTrue(some.hasActiveSpeech)
+        XCTAssertTrue(some.hasAnyService)
     }
 
     // MARK: - 面板多账号内容高度

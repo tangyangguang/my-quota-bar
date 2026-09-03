@@ -84,25 +84,32 @@ enum PersistenceError: LocalizedError {
 // MARK: - 账号配置（用户在设置里录入）
 
 /// 一个语音应用（账号下可有多个，最多 10 个）。
+///
+/// 每个应用内部的 ASR（语音识别）与 TTS（语音合成）各自独立开关：
+/// 例如 ASR 额度用尽（0%）时可单独关掉 ASR、只保留 TTS，面板就不再显示红色的 ASR 卡。
 struct SpeechApp: Codable, Identifiable, Equatable, Sendable {
     let id: String        // 稳定 UUID
     var appID: String     // 语音应用 AppID
     var label: String     // 可选显示名；空则用 "应用 \(appID)"
+    var enableASR: Bool   // 是否获取/展示该应用的语音识别（ASR）额度
+    var enableTTS: Bool   // 是否获取/展示该应用的语音合成（TTS）额度
 
-    init(id: String = UUID().uuidString, appID: String = "", label: String = "") {
+    init(id: String = UUID().uuidString, appID: String = "", label: String = "",
+         enableASR: Bool = true, enableTTS: Bool = true) {
         self.id = id
         self.appID = appID
         self.label = label
+        self.enableASR = enableASR
+        self.enableTTS = enableTTS
     }
 
-    enum CodingKeys: String, CodingKey { case id, appID, label }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? UUID().uuidString
-        appID = (try? c.decodeIfPresent(String.self, forKey: .appID)) ?? ""
-        label = (try? c.decodeIfPresent(String.self, forKey: .label)) ?? ""
+    /// AppID 是否为有效数字（>0）。
+    var hasValidAppID: Bool {
+        Int(appID.trimmingCharacters(in: .whitespaces)).map { $0 > 0 } ?? false
     }
+
+    /// 是否实际参与取数/展示：AppID 有效且 ASR/TTS 至少开一个。全不勾 = 不拉数、不显示。
+    var isActive: Bool { hasValidAppID && (enableASR || enableTTS) }
 
     /// 显示名：用户填了 label 用 label，否则「应用 <AppID>」。
     var displayLabel: String {
@@ -112,57 +119,46 @@ struct SpeechApp: Codable, Identifiable, Equatable, Sendable {
 
 /// 一个平台账号的用户配置。AK/SK 存钥匙串（不落 JSON），其余非敏感字段存 UserDefaults。
 ///
-/// 【可扩展】platform 字段已埋好；将来加其它平台时不用改结构。
-/// 【防丢失】自定义 Decodable：旧版 JSON（无 platform 字段）也能正常解析，
-/// 将来新增字段只要给默认值、旧配置就不会因 schema 变动而丢失。
+/// 语音是否启用由 `speechApps` 派生：存在「AppID 有效且 ASR/TTS 至少开一个」的应用即为启用，
+/// 不再有独立的语音总开关。Codable 由编译器合成；历史遗留的未知字段（如 enableSpeech）
+/// 解码时自动忽略，不会报错。
 struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
-    let id: String            // 稳定 UUID
-    var platform: Platform    // 所属平台（默认火山引擎）
-    var alias: String         // 用户自定义别名（可空）
-    var accountFullID: String?// 测试连接后拿到的账号 ID（持久化，用于命名尾号）
-    var enableAgentPlan: Bool // 是否获取/展示 Agent Plan（仅火山）
-    var enableSpeech: Bool    // 是否获取/展示语音服务；关闭时保留 AppID 配置
-    var speechApps: [SpeechApp] // 语音应用列表（0..10，仅火山）
+    let id: String              // 稳定 UUID（钥匙串按它存取 AK/SK，不可变）
+    var platform: Platform      // 所属平台
+    var alias: String           // 用户自定义别名（可空）
+    var accountFullID: String?  // 测试连接后拿到的账号 ID（持久化，用于命名尾号）
+    var enableAgentPlan: Bool   // 是否获取/展示 Agent Plan
+    var speechApps: [SpeechApp] // 语音应用列表（0..10）
+    var iamIdentity: String?    // 身份标记："root"（主账号）/ "user:<名>"（子用户）；测试连接后写入
 
     init(id: String = UUID().uuidString, platform: Platform = .volcengine,
          alias: String = "", accountFullID: String? = nil,
-         enableAgentPlan: Bool = false, enableSpeech: Bool? = nil,
-         speechApps: [SpeechApp] = []) {
+         enableAgentPlan: Bool = false, speechApps: [SpeechApp] = [],
+         iamIdentity: String? = nil) {
         self.id = id
         self.platform = platform
         self.alias = alias
         self.accountFullID = accountFullID
         self.enableAgentPlan = enableAgentPlan
-        self.enableSpeech = enableSpeech ?? !speechApps.isEmpty
         self.speechApps = speechApps
+        self.iamIdentity = iamIdentity
     }
 
-    enum CodingKeys: String, CodingKey {
-        case id, platform, alias, accountFullID, enableAgentPlan, enableSpeech, speechApps
-    }
+    /// 是否有启用中的语音应用。
+    var hasActiveSpeech: Bool { speechApps.contains { $0.isActive } }
 
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        // 防御式：缺失字段一律给默认值，旧配置不会解析失败
-        platform = Platform.from(try c.decodeIfPresent(String.self, forKey: .platform))
-        alias = (try? c.decodeIfPresent(String.self, forKey: .alias)) ?? ""
-        accountFullID = try? c.decodeIfPresent(String.self, forKey: .accountFullID)
-        enableAgentPlan = (try? c.decodeIfPresent(Bool.self, forKey: .enableAgentPlan)) ?? false
-        speechApps = (try? c.decodeIfPresent([SpeechApp].self, forKey: .speechApps)) ?? []
-        // 旧配置没有开关时，有应用即视为已启用，保持升级前行为。
-        enableSpeech = (try? c.decodeIfPresent(Bool.self, forKey: .enableSpeech)) ?? !speechApps.isEmpty
-    }
+    /// 该账号是否有任何会在面板展示的服务。
+    var hasAnyService: Bool { enableAgentPlan || hasActiveSpeech }
 
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(platform.rawValue, forKey: .platform)
-        try c.encode(alias, forKey: .alias)
-        try c.encodeIfPresent(accountFullID, forKey: .accountFullID)
-        try c.encode(enableAgentPlan, forKey: .enableAgentPlan)
-        try c.encode(enableSpeech, forKey: .enableSpeech)
-        try c.encode(speechApps, forKey: .speechApps)
+    /// 身份徽章文案：主账号 / 子用户 · 名称；未知返回 nil。
+    var identityBadge: String? {
+        guard let iamIdentity else { return nil }
+        if iamIdentity == "root" { return "主账号" }
+        if iamIdentity.hasPrefix("user:") {
+            let name = String(iamIdentity.dropFirst("user:".count))
+            return name.isEmpty ? "子用户" : "子用户 · \(name)"
+        }
+        return nil
     }
 }
 

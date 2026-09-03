@@ -4,6 +4,8 @@ import Foundation
 struct PlatformIdentity: Sendable, Equatable {
     let accountID: String
     let displayName: String?
+    /// 身份标记：主账号 "root"，子用户 "user:<name>"；拿不到为 nil。
+    let iamIdentity: String?
 
     var suggestedAccountName: String { displayName ?? accountID }
 }
@@ -53,7 +55,9 @@ struct VolcenginePlatformAdapter: PlatformAdapter {
             throw QuotaError.parseFailed("请填写完整凭证")
         }
         let identity = try await VolcSigner.identity(accessKeyID: ak, secretAccessKey: sk)
-        return PlatformIdentity(accountID: identity.accountID, displayName: identity.userName)
+        return PlatformIdentity(accountID: identity.accountID,
+                                displayName: identity.userName,
+                                iamIdentity: identity.kindCode)
     }
 }
 

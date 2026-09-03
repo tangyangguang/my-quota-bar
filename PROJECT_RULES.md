@@ -14,15 +14,16 @@
 - 以后有新账号 / 新服务 / 新平台，直接往这个 App 里加，不再新建应用。
 - 参考同级目录的 `~/workspace/codex-quota-menubar/`（样式可参考）——**但那是独立项目，绝不要改它**。
 
-## 当前状态（2026-07，重构后）
+## 当前状态（2026-09，设置交互重构后）
 
-**当前版本：1.1.0（build 2），已完成并稳定运行。** 版本变化见 `CHANGELOG.md`。核心能力：
+**当前版本：1.1.0（build 2）稳定；设置交互重构见 `CHANGELOG.md` 未发布。** 核心能力：
 - ✅ **多平台架构**：开放 `Platform` 标识 + `PlatformAdapter` 注册表（目前仅 `volcengine`）；未知平台原样保留，加新平台不破坏旧 schema。
 - ✅ **任意多账号**：每个账号一对 AK/SK，配置任意数量，可拖动排序。
 - ✅ **火山 Agent Plan**：AK/SK 直调 OpenAPI `GetAFPUsage`（**已彻底移除 arkcli 依赖**）。
-- ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度。
+- ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度；**每个应用内 ASR / TTS 可分别独立开关**。
 - ✅ **测试驱动配置**：AK/SK、Agent Plan、每个语音应用都有独立「测试」按钮，绿/红反馈。
-- ✅ **经典主从布局设置窗口** + **零命令行分发**。
+- ✅ **设置「即时生效」**：改名 / 拨开关 / 增删语音应用 / 排序都立即落盘并刷新，无保存按钮；仅「更换密钥」先测试后保存。
+- ✅ **开机自动启动**（`SMAppService`，通用页开关）+ **零命令行分发**。
 
 ## 关键设计原则（务必遵守）
 
@@ -49,12 +50,14 @@
 - **禁止** k / w / 1.8K 这类友好压缩。和控制台网页对齐。
 
 ### 4. 菜单栏常驻显示：用户手动勾选一个
-- 菜单栏图标旁常驻显示**一个**指标，由用户在「显示」设置里勾选；**不自动挑选、不轮换**。
+- 菜单栏图标旁常驻显示**一个**指标，由用户在「通用」设置里勾选（也可在面板点卡片快捷钉选）；**不自动挑选、不轮换**。
 - 图标窄（`imageScale(.small)`），跟随服务类型变化。
 
 ### 5. 防丢配置（关键约束）
-- 所有持久化结构用**防御式 Codable**：缺字段给默认值；未知平台保留原始 ID 并标记不支持，**绝不能误写成火山引擎**。
-- `AccountConfig` / `SpeechApp` 都自定义了 `init(from:)`，加新字段时务必保持这个习惯。
+- **账号 `id` 是稳定 UUID，绝不变更**：AK/SK 在钥匙串里按 `ak_<id>` / `sk_<id>` 存，只要 id 不变凭证就不丢。
+- 持久化模型用编译器**合成 Codable**，字段与当前 schema 保持一致；历史遗留的多余字段（如已移除的 `enableSpeech`）解码时自动忽略。**不写旧格式兼容解码、不做数据迁移、不留兼容样板**。
+- 未知平台 ID 原样保留并标记不支持，**绝不能误写成火山引擎**；`Platform` 是开放的 RawRepresentable，天然不丢未知值。
+- `AccountStore` 保留备份回退 + 损坏写锁兜底：主配置损坏回退备份，都损坏则锁定写入，**绝不以空数组覆盖原数据**。
 - 有单测守这条底线（见"测试"节）。
 
 ## 技术选型（已定）
@@ -67,7 +70,8 @@
 | 认证 | 账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift` |
 | 凭证存储 | AK/SK 加密存 macOS 钥匙串（按账号 UUID 隔离）；非敏感配置存 UserDefaults(JSON) |
 | 定时刷新 | 全 App 单一非重复调度 Timer；按源计算 nextAttempt；最多 4 个账号并发；失败指数退避；分项失败保留旧值；休眠/断网感知；Timer tolerance 降耗 |
-| 刷新间隔 | 默认 3 分钟（180s），可在「显示」设置按源独立调。上游有 5–30 分钟延迟 |
+| 刷新间隔 | 默认 3 分钟（180s），可在「通用」设置里调（UI 一个间隔，内部按源调度）。上游有 5–30 分钟延迟 |
+| 开机启动 | `SMAppService.mainApp`，通用页开关；纯系统能力，不进配置 schema |
 | 运行形态 | `LSUIElement=true`，无 Dock 图标，仅菜单栏 |
 
 ## 数据来源登记（官方接口变了照此更新）
@@ -93,7 +97,7 @@
 ### 账号身份 —— STS GetCallerIdentity
 - **接口**：`GET https://open.volcengineapi.com/?Action=GetCallerIdentity&Version=2018-01-01`
 - **Service** `sts`，**Region** `cn-north-1`
-- **返回**：`Result.AccountId`（数字）、`Trn`（含 IAM 用户名，形如 `trn:iam::<id>:user/<名>`）
+- **返回**：`Result.AccountId`（数字）、`Trn`。Trn 形如 `trn:iam::<id>:root`（主账号）或 `trn:iam::<id>:user/<名>`（子用户）；据此解析 `isRoot` 与子用户名，写入账号的 `iamIdentity`。**该接口只返回账号 ID 与 Trn，官方不开放手机号/邮箱查询，不要臆造手机号字段。**
 - **用途**：测试连接时拿账号 ID + 真实名称（IAM 用户名；若是默认 `user` 占位则回落账号 ID）自动填账户名称。
 - 实现：`VolcSigner.fetchIdentity(...)` / `fetchAccountID(...)`
 
@@ -101,8 +105,8 @@
 
 - **`Platform`**（开放标识 struct，Codable）：当前 `volcengine`。未知平台原样保留，`PlatformRegistry` 只公布当前可新建的平台。
 - **`PlatformAdapter`**（Platforms/）：声明平台凭证字段、身份测试和服务目录；当前实现 `VolcenginePlatformAdapter`。
-- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `enableSpeech` / `speechApps[]`。**自定义 Codable 防丢配置**；旧语音配置自动迁移为启用。AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。
-- **`SpeechApp`**：`id(UUID)` / `appID` / `label`。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。**自定义 Codable**。
+- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `speechApps[]` / `iamIdentity?`（身份标记 "root" / "user:<名>"，测试连接后写入，`identityBadge` 显示为「主账号 / 子用户 · 名」）。合成 Codable；AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。**没有独立语音总开关**：`hasActiveSpeech` 派生自 speechApps，`hasAnyService = enableAgentPlan || hasActiveSpeech`。
+- **`SpeechApp`**：`id(UUID)` / `appID` / `label` / `enableASR` / `enableTTS`（合成 Codable）。`isActive` = AppID 为有效数字且 ASR/TTS 至少开一个；全不勾或 AppID 无效则不拉数、不出卡（配置仍保留）。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。取数时只请求开启的子服务，关掉的不出卡、不报错。
 - **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串。
 - **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.speech`)（QuotaModels.swift）。
 
@@ -118,8 +122,9 @@ my-quota-bar/
 ├── Resources/Info.plist           # LSUIElement=true, bundle id local.my.quota-bar
 ├── Sources/MyQuotaBar/
 │   ├── MyQuotaBarApp.swift         # @main, MenuBarExtra + 设置 Window
-│   ├── AppModel.swift              # 状态 + 账号CRUD + 单调度器/并发闸门 + 菜单栏显示 + 测试方法
+│   ├── AppModel.swift              # 状态 + 账号即时编辑方法 + 单调度器/并发闸门 + 菜单栏显示 + 测试方法
 │   ├── Settings.swift              # 非账号设置持久化（菜单栏指标 / 刷新间隔）
+│   ├── LoginItem.swift             # 开机自动启动（SMAppService）
 │   ├── Keychain.swift              # 钥匙串封装 + AccountConfig + SpeechApp + AccountStore
 │   ├── Models/
 │   │   └── QuotaModels.swift       # Platform / Account / Service / 各服务原样数据结构
@@ -141,17 +146,24 @@ my-quota-bar/
 └── outputs/                        # 构建产物 .app（gitignore）
 ```
 
-## 设置窗口 UI（主从布局，经典 macOS 范式）
+## 设置窗口 UI（主从布局 + 即时生效）
 
-- **两个 Tab**：「账号」+「显示」。
+- **两个 Tab**：「账号」+「通用」。
+- **核心范式：改了立即生效**（macOS 系统设置风格）。**没有保存按钮、没有草稿、没有未保存拦截**：
+  - 改名 → `setAlias`（只落盘 + 改面板名，不拉网络）。
+  - 拨 Agent Plan 开关、增删语音应用、改 AppID/备注/ASR·TTS 复选框 → 落盘后 `reconfigureService`（提升代数丢弃旧响应 → 清空该账号展示 → 按新配置重拉）。
+  - 语音文本框（AppID/备注）用本地草稿，在 onSubmit / 复选框 / 测试 / 删除 / onDisappear 时把「AppID 有效」的应用同步到 model；空 AppID 草稿只留界面、不入库不拉数。`setSpeechApps` 与现状一致时跳过，避免无意义重拉。
 - **账号 Tab = 左右主从**：
-  - 左边栏：账号列表（选中高亮 + **拖动排序**，影响面板顺序），左下 `+`(添加) / `−`(删除选中，二次确认)。
-  - 右侧顶部用分段控件明确分成「账号信息 / 服务管理」两个页面。
-  - 账号信息：平台只读 / 名称 / 账号ID / AK / SK / 测试连接；服务管理：Agent Plan 与语音服务同级卡片，AppID 是语音服务内部实例。
-  - 分页各自显示保存按钮；切换账号或关闭窗口遇到未保存修改必须提示保存/放弃/取消。
-- **添加账号**：独立小弹窗，平台 + AK/SK + 测试(可选，不挡保存) + 名称(测通自动填)。
-- **服务卡片**：Agent Plan 与语音服务使用统一 `ServiceCardStyle` 同级展示并各有开关；语音 AppID 用更轻的内层实例卡片。关闭语音服务时保留 AppID 配置。
-- **显示 Tab**：菜单栏显示哪个指标（Picker）；各源刷新间隔（**注意：间隔存 AppModel observable 属性，不是直读 UserDefaults，否则 Picker 会回弹**）。
+  - 左边栏：账号列表（选中高亮 + **拖动排序**，影响面板顺序），左下 `+`(添加) / `−`(删除选中，二次确认)。选中切换无拦截。
+  - 右侧**单页滚动**，三个平级分组（与官方「账号 → 服务域 → 服务实例」层级对齐）：
+    - 「账号」：平台只读 / 名称（即时）/ 账号 ID / **「更换密钥…」按钮**（AK/SK 不常驻输入框）。
+    - 「套餐」：订阅套餐类服务，现在是 Agent Plan 卡片（`ServiceCardStyle`，开关 + 测试）；以后有别的套餐加这里。
+    - 「语音」：语音服务域。标题行右侧「添加应用」；下面每个语音应用（AppID）直接平铺成与 Agent Plan **同级**的 `ServiceCardStyle` 卡片，**没有语音总开关、没有包裹卡**。
+- **语音启用逻辑**：没有总开关。一个语音应用是否取数/显示，完全由它的 ASR/TTS 复选框决定——两个都不勾 = 不拉数、面板不显示（AppID/备注保留，等同关闭）；删除应用才彻底移除。
+- **更换密钥**：独立弹窗，预填当前 AK/SK；改后必须先「测试连接」通过才能「保存密钥」；密钥真的变了才清身份缓存并重拉（`changeCredentials`）。
+- **语音子服务开关**：每个语音应用卡片内有「语音识别 ASR」「语音合成 TTS」两个复选框；关掉的子服务不请求、不出卡（例如 ASR 用尽可只关 ASR 保留 TTS）。
+- **添加账号**：独立小弹窗，平台 + AK/SK + 测试(可选，不挡保存) + 名称(测通自动填)；添加后自动选中，服务默认全关，自行拨开关即时生效。
+- **通用 Tab**：菜单栏显示哪个指标（Picker）；**一个**「刷新间隔」（写所有源，间隔存 AppModel observable 属性、不是直读 UserDefaults，否则 Picker 回弹）；「开机自动启动」开关（SMAppService）；版本号。
 
 ## 开发约定（务必遵守）
 
@@ -161,7 +173,8 @@ my-quota-bar/
   ```
 - SwiftUI 在 `MenuBarExtra(.window)` 里的滚动区必须先测量内容并设置非零显式高度，避免 `ScrollView` 塌成 0；内容未超上限时使用自然高度，超出后才滚动。
 - **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）。仓库**公开**：AppID 用户填、AK/SK 存钥匙串、`pics/` 已 gitignore。
-- **每源独立刷新间隔**（`AppModel.RefreshSource`），但全 App 只用一个调度 Timer；禁止按账号创建 Timer。请求经并发闸门限制为最多 4 个账号并发。
+- **刷新间隔**：内部仍按 `AppModel.RefreshSource`（agentPlan / speech）分别调度，但全 App 只用一个调度 Timer，禁止按账号创建 Timer；设置 UI 只暴露一个「刷新间隔」，写入时同时设置所有源。请求经并发闸门限制为最多 4 个账号并发。
+- **设置交互一律即时生效**，不要再引入「保存按钮 + 草稿 + 未保存拦截」；唯一例外是更换密钥（先测试通过才写入）。
 - **关键纯逻辑必须有单测**（数值格式化、百分比除零保护、AFP 解析、显示名、倒计时文案、**schema 演进兼容**）。改相关逻辑后 `swift test` 确保绿。
 - **凭证持久化**：AK/SK 一次配好永久存钥匙串，编辑账号自动回填。Keychain 必须原地 update、检查 OSStatus；两项写入失败要回滚，禁止先删旧值。
 - **配置保护**：主 JSON 覆盖前保留最近有效备份；主配置损坏时回退备份，主备份都损坏则锁定写入，绝不能以空数组覆盖原始数据。
@@ -189,7 +202,7 @@ my-quota-bar/
 **加新服务**（如火山下别的语音种类）：
 1. `ServiceContent` 枚举加 case + 写对应 `*CardView`。
 2. 写该服务的 Provider（取数 + test）。
-3. `AccountConfig` 加对应开关字段（保持防御式 Codable）。
+3. `AccountConfig` 加对应字段（合成 Codable，字段保持非可选、与当前 schema 一致）。
 4. 用哪个加哪个，不用一次做完。
 
 ## 刻意不做（保持简洁）

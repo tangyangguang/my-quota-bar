@@ -64,10 +64,14 @@ struct VolcSigner: Sendable {
     /// 账号身份信息。
     struct Identity: Sendable {
         let accountID: String   // 账号 ID（一串数字）
-        let userName: String?   // IAM 用户名（从 Trn 解析，如有）
+        let userName: String?   // IAM 子用户名（主账号 root 时为 nil）
+        let isRoot: Bool        // 是否主账号 AK/SK（Trn 为 ...:root）
 
-        /// 友好名：优先 IAM 用户名，没有则用账号 ID。
+        /// 友好名：优先子用户名，主账号/无名时用账号 ID。
         var friendlyName: String { userName ?? accountID }
+
+        /// 持久化用的身份标记：主账号 "root"，子用户 "user:<name>"。
+        var kindCode: String { isRoot ? "root" : "user:\(userName ?? "")" }
     }
 
     /// 查询当前 AK/SK 对应的身份，保留 HTTP 与官方错误，供测试连接给出准确反馈。
@@ -97,13 +101,20 @@ struct VolcSigner: Sendable {
         else if let id = result["AccountId"] as? String { accountID = id }
         else { throw QuotaError.parseFailed("身份响应缺少 AccountId") }
 
-        // Trn 形如 trn:iam::2130011074:user/小明 → 取最后一段作为用户名
+        // Trn 形如 trn:iam::<accountID>:root（主账号）或 trn:iam::<accountID>:user/<名>（子用户）
+        var isRoot = false
         var userName: String?
-        if let trn = result["Trn"] as? String, let last = trn.split(separator: "/").last {
-            let name = String(last)
-            if !name.isEmpty, name != "user" { userName = name }
+        if let trn = result["Trn"] as? String,
+           let marker = trn.range(of: ":\(accountID):") {
+            let resource = String(trn[marker.upperBound...])
+            if resource == "root" {
+                isRoot = true
+            } else if resource.hasPrefix("user/") {
+                let name = String(resource.dropFirst("user/".count))
+                if !name.isEmpty { userName = name }
+            }
         }
-        return Identity(accountID: accountID, userName: userName)
+        return Identity(accountID: accountID, userName: userName, isRoot: isRoot)
     }
 
     /// 后台补账号 ID 时不打扰用户，失败返回 nil；测试连接应使用 identity() 获取具体错误。

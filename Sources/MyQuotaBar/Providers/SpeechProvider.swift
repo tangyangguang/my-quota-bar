@@ -39,11 +39,23 @@ struct SpeechProvider: Sendable {
         let error: String?
     }
 
+    /// 查询哪些子服务由配置决定（ASR / TTS 可单独关掉）。
+    struct Options: Sendable {
+        var includeASR: Bool
+        var includeTTS: Bool
+        static let both = Options(includeASR: true, includeTTS: true)
+    }
+
     /// ASR 与 TTS 并行、分项容错；一个失败不会阻止另一个返回。
-    func fetchOutcome() async -> FetchOutcome {
-        async let asr = capture(title: "语音识别 ASR", resourceIDs: ["volc.seedasr.sauc.duration"])
-        async let tts = capture(title: "语音合成 TTS", resourceIDs: ["volc.tts.default"])
-        let outcomes = await [asr, tts]
+    /// 只查询开启的子服务；关掉的子服务不请求、不产生卡片和错误。
+    func fetchOutcome(_ options: Options = .both) async -> FetchOutcome {
+        async let asr: QueryOutcome? = options.includeASR
+            ? capture(title: "语音识别 ASR", resourceIDs: ["volc.seedasr.sauc.duration"])
+            : nil
+        async let tts: QueryOutcome? = options.includeTTS
+            ? capture(title: "语音合成 TTS", resourceIDs: ["volc.tts.default"])
+            : nil
+        let outcomes = await [asr, tts].compactMap { $0 }
         let packs = outcomes.flatMap(\.packs)
         let errors = Dictionary(uniqueKeysWithValues: outcomes.compactMap { item in
             item.error.map { (item.title, $0) }
@@ -59,9 +71,12 @@ struct SpeechProvider: Sendable {
         return outcome.packs
     }
 
-    /// 测试：必须所有已查询分项都正常，部分成功会明确提示。
-    func test() async -> (ok: Bool, message: String) {
-        let outcome = await fetchOutcome()
+    /// 测试：只验证开启的子服务；必须所有已查询分项都正常，部分成功会明确提示。
+    func test(_ options: Options = .both) async -> (ok: Bool, message: String) {
+        if !options.includeASR && !options.includeTTS {
+            return (false, "请至少开启一个子服务（ASR 或 TTS）")
+        }
+        let outcome = await fetchOutcome(options)
         if !outcome.errors.isEmpty {
             let details = outcome.errors.sorted { $0.key < $1.key }
                 .map { "\($0.key)：\($0.value)" }.joined(separator: "；")
