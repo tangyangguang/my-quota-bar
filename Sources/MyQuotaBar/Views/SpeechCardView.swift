@@ -32,7 +32,8 @@ struct SpeechCardView: View {
 
     /// 紧凑样式：与 Agent Plan 紧凑周期行一一对应（短名/进度条/剩% 一行，明细一行）。
     private var compactBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // 语音无 hover/pin 背景，不加垂直边距；行间距与标准样式一致（4），高度不超标准。
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(pack.shortName)
                     .font(.system(size: 13, weight: .medium))
@@ -46,10 +47,8 @@ struct SpeechCardView: View {
 
             detailRow
         }
-        // 与 Agent Plan 周期行相同的行内边距，保证进度条左右边界严格对齐。
+        // 与 Agent Plan 周期行相同的水平边距，保证进度条左右边界对齐。
         .padding(.horizontal, 8)
-        // 语音条目只有一条（无相邻行），垂直边距减半，避免单个条目上下显得空。
-        .padding(.vertical, 3)
     }
 
     private var detailRow: some View {
