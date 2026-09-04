@@ -18,6 +18,13 @@ enum AppSettings {
         }
     }
 
+    /// Agent Plan 卡片紧凑样式开关。默认 false = 标准样式（现有布局原样）。
+    private static let compactLayoutKey = "agentPlanCompactLayout"
+    static var agentPlanCompactLayout: Bool {
+        get { UserDefaults.standard.bool(forKey: compactLayoutKey) }
+        set { UserDefaults.standard.set(newValue, forKey: compactLayoutKey) }
+    }
+
     /// 刷新间隔（秒）—— 按数据源独立配置。默认 180 秒（3 分钟）。
     static func refreshInterval(for source: String) -> Int {
         let v = UserDefaults.standard.integer(forKey: "refreshInterval_\(source)")

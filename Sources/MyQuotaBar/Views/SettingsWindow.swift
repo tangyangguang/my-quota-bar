@@ -944,6 +944,18 @@ struct GeneralTab: View {
                     .font(.caption)
             }
 
+            Section {
+                Toggle("Agent Plan 卡片使用紧凑样式", isOn: Binding(
+                    get: { model.agentPlanCompactLayout },
+                    set: { model.agentPlanCompactLayout = $0 }
+                ))
+            } header: {
+                Text("外观")
+            } footer: {
+                Text("紧凑样式把进度条移入周期名与剩余百分比之间，信息不变、高度更短；面板右上角按钮也可快速切换。")
+                    .font(.caption)
+            }
+
             Section("启动") {
                 Toggle("开机自动启动 My Quota Bar", isOn: launchBinding)
             }

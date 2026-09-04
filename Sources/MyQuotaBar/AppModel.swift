@@ -23,6 +23,11 @@ final class AppModel {
         didSet { AppSettings.selectedMetricID = selectedMetricID }
     }
 
+    /// Agent Plan 卡片紧凑样式（false = 标准样式，现有布局）。
+    var agentPlanCompactLayout: Bool = false {
+        didSet { AppSettings.agentPlanCompactLayout = agentPlanCompactLayout }
+    }
+
     @ObservationIgnored private var schedulerTimer: Timer?
     @ObservationIgnored private let requestGate = AsyncPermitGate(limit: 4)
     /// 配置代数：账号修改/删除时递增，旧网络请求返回后必须丢弃。
@@ -72,6 +77,7 @@ final class AppModel {
 
     init() {
         selectedMetricID = AppSettings.selectedMetricID
+        agentPlanCompactLayout = AppSettings.agentPlanCompactLayout
         for source in RefreshSource.allCases {
             refreshIntervals[source.rawValue] = AppSettings.refreshInterval(for: source.rawValue)
         }

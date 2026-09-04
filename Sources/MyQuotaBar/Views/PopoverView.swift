@@ -62,6 +62,19 @@ struct PopoverView: View {
             Text("My Quota Bar")
                 .font(.headline)
             Spacer()
+            Button {
+                model.agentPlanCompactLayout.toggle()
+            } label: {
+                Image(systemName: model.agentPlanCompactLayout
+                      ? "rectangle.expand.vertical"
+                      : "rectangle.compress.vertical")
+                    .imageScale(.small)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(model.agentPlanCompactLayout
+                  ? "当前为紧凑样式，点击切回标准样式"
+                  : "切换 Agent Plan 卡片紧凑样式")
             if model.isRefreshing {
                 ProgressView().controlSize(.small)
             } else if let last = model.lastRefreshAt {
