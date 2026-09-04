@@ -28,6 +28,31 @@ final class AppModel {
         didSet { AppSettings.agentPlanCompactLayout = agentPlanCompactLayout }
     }
 
+    /// 折叠的账号 ID 集合。
+    var collapsedAccounts: Set<String> = [] {
+        didSet { AppSettings.collapsedAccounts = collapsedAccounts }
+    }
+
+    /// 折叠的服务键集合（"<账号ID>:<服务ID>"）。
+    var collapsedServices: Set<String> = [] {
+        didSet { AppSettings.collapsedServices = collapsedServices }
+    }
+
+    func toggleAccountCollapsed(_ id: String) {
+        if collapsedAccounts.contains(id) { collapsedAccounts.remove(id) }
+        else { collapsedAccounts.insert(id) }
+    }
+
+    func toggleServiceCollapsed(accountID: String, serviceID: String) {
+        let key = "\(accountID):\(serviceID)"
+        if collapsedServices.contains(key) { collapsedServices.remove(key) }
+        else { collapsedServices.insert(key) }
+    }
+
+    func isServiceCollapsed(accountID: String, serviceID: String) -> Bool {
+        collapsedServices.contains("\(accountID):\(serviceID)")
+    }
+
     @ObservationIgnored private var schedulerTimer: Timer?
     @ObservationIgnored private let requestGate = AsyncPermitGate(limit: 4)
     /// 配置代数：账号修改/删除时递增，旧网络请求返回后必须丢弃。
@@ -78,6 +103,8 @@ final class AppModel {
     init() {
         selectedMetricID = AppSettings.selectedMetricID
         agentPlanCompactLayout = AppSettings.agentPlanCompactLayout
+        collapsedAccounts = AppSettings.collapsedAccounts
+        collapsedServices = AppSettings.collapsedServices
         for source in RefreshSource.allCases {
             refreshIntervals[source.rawValue] = AppSettings.refreshInterval(for: source.rawValue)
         }
@@ -230,6 +257,8 @@ final class AppModel {
         bumpRevision(for: id)
         accounts.removeAll { $0.id == id }
         accountFullID_[id] = nil
+        collapsedAccounts.remove(id)
+        collapsedServices = collapsedServices.filter { !$0.hasPrefix("\(id):") }
         persistenceError = nil
         configurationWarning = nil
         try AccountStore.deleteCredentials(for: id)

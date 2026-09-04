@@ -1,29 +1,100 @@
 import SwiftUI
 
-/// 一个账号分组：标题 + 该账号下各服务的专属卡片。
+/// 一个账号分组：标题（可点折叠）+ 该账号下各服务的专属卡片；
+/// 折叠后收成一张摘要小卡（各指标短标签 + 带色剩余百分比）。
 struct AccountSectionView: View {
     let account: Account
     @Bindable var model: AppModel
+    @State private var hovered = false
+
+    private var isCollapsed: Bool { model.collapsedAccounts.contains(account.id) }
+    /// chevron：折叠时常显（保证能发现可展开）；展开时仅 hover 显示。
+    private var chevronVisible: Bool { isCollapsed || hovered }
+    private var hasError: Bool { account.services.contains { $0.status == .error } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 5) {
-                Image(systemName: "person.crop.circle")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Text(account.accountDisplayName)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, 16)
+            header
+                .padding(.horizontal, 16)
 
-            ForEach(account.services) { service in
-                ServiceCardView(service: service, account: account, model: model)
+            if isCollapsed {
+                collapsedCard
                     .padding(.horizontal, 12)
+            } else {
+                ForEach(account.services) { service in
+                    ServiceCardView(service: service, account: account, model: model)
+                        .padding(.horizontal, 12)
+                }
             }
         }
+    }
+
+    private var header: some View {
+        HStack(spacing: 5) {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+                .opacity(chevronVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.12), value: chevronVisible)
+            Image(systemName: "person.crop.circle")
+                .imageScale(.small)
+                .foregroundStyle(.secondary)
+            Text(account.accountDisplayName)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if isCollapsed, let tier = collapsedTier {
+                Text(tier)
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    .foregroundStyle(.secondary)
+            }
+            if isCollapsed && hasError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(.orange)
+                    .help("该账号有服务刷新失败，展开查看详情")
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.toggleAccountCollapsed(account.id) }
+        .onHover { hovered = $0 }
+        .help(isCollapsed ? "点击展开账号" : "点击折叠账号")
+    }
+
+    /// 折叠态摘要小卡：一行带色指标，信息与展开态同源。
+    private var collapsedCard: some View {
+        let metrics = SummaryBuilder.metrics(for: account)
+        return HStack(spacing: 0) {
+            if metrics.isEmpty {
+                Text("暂无可显示的额度")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                QuotaSummaryLine(metrics: metrics)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .opacity(hasError ? 0.7 : 1)
+    }
+
+    private var collapsedTier: String? {
+        for service in account.services {
+            if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
+                return plan.tier
+            }
+        }
+        return nil
     }
 }
 
@@ -36,15 +107,30 @@ struct ServiceCardView: View {
     let service: Service
     let account: Account
     @Bindable var model: AppModel
+    @State private var hovered = false
+
+    private var isAgentPlan: Bool {
+        if case .agentPlan = service.content { return true }
+        return false
+    }
+    private var isCollapsed: Bool {
+        isAgentPlan && model.isServiceCollapsed(accountID: account.id, serviceID: service.id)
+    }
+    /// chevron：折叠时常显；展开时仅 hover 卡片显示。语音卡不显示。
+    private var chevronVisible: Bool { isAgentPlan && (isCollapsed || hovered) }
 
     var body: some View {
-        // 卡片内容（标题行 + 服务详情 + 错误信息）。原 UI 一字不动。
+        // 卡片内容（标题行 + 服务详情 + 错误信息）。
         let content = VStack(alignment: .leading, spacing: 8) {
             titleRow
 
             switch service.content {
             case .agentPlan(let plan):
-                AgentPlanCardView(plan: plan, account: account, service: service, model: model)
+                if isCollapsed {
+                    QuotaSummaryLine(metrics: SummaryBuilder.metrics(for: plan, serviceID: service.id))
+                } else {
+                    AgentPlanCardView(plan: plan, account: account, service: service, model: model)
+                }
             case .speech(let pack):
                 SpeechCardView(pack: pack)
             }
@@ -62,6 +148,7 @@ struct ServiceCardView: View {
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
         .opacity(service.status == .error ? 0.7 : 1)
+        .onHover { if isAgentPlan { hovered = $0 } }
 
         // 语音服务：整张 service 卡片是 1 个指标 → 整张可点击。
         // Agent Plan：每个 period 各自是 1 个指标 → 在 AgentPlanCardView 里逐行套 menuBarPinRow。
@@ -78,9 +165,18 @@ struct ServiceCardView: View {
     }
 
     /// 服务标题行：语音服务会在右端显示「剩 X%」（保持原样）。
+    /// Agent Plan 标题行最左有折叠 chevron（hover 显示 / 折叠常显），整行可点折叠。
     @ViewBuilder
     private var titleRow: some View {
         HStack(spacing: 6) {
+            if isAgentPlan {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                    .opacity(chevronVisible ? 1 : 0)
+                    .animation(.easeOut(duration: 0.12), value: chevronVisible)
+            }
             Text(service.title)
                 .font(.system(size: 12, weight: .semibold))
             if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
@@ -97,6 +193,13 @@ struct ServiceCardView: View {
                     .monospacedDigit()
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isAgentPlan {
+                model.toggleServiceCollapsed(accountID: account.id, serviceID: service.id)
+            }
+        }
+        .help(isAgentPlan ? (isCollapsed ? "点击展开套餐详情" : "点击折叠为摘要") : "")
     }
 
     @ViewBuilder

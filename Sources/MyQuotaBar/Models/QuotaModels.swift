@@ -125,6 +125,16 @@ struct AgentPlanPeriod: Identifiable, Equatable, Sendable {
     var remainingPercent: Double {
         max(0, min(100, 100 - percent))
     }
+
+    /// 折叠摘要行用的短标签。
+    var shortName: String {
+        switch label {
+        case "5h": return "5h"
+        case "weekly": return "周"
+        case "monthly": return "月"
+        default: return displayName
+        }
+    }
 }
 
 // MARK: - 语音服务原生结构
@@ -143,6 +153,13 @@ struct SpeechPack: Identifiable, Equatable, Sendable {
     let type: String         // 「试用包」
 
     var id: String { title }
+
+    /// 折叠摘要行用的短标签：ASR / TTS。
+    var shortName: String {
+        if title.contains("ASR") { return "ASR" }
+        if title.contains("TTS") { return "TTS" }
+        return title
+    }
 
     /// 剩余百分比（0-100）
     var remainingPercent: Double {

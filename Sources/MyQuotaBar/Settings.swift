@@ -18,6 +18,20 @@ enum AppSettings {
         }
     }
 
+    /// 折叠的账号 ID 集合（持久化）。
+    private static let collapsedAccountsKey = "collapsedAccounts"
+    static var collapsedAccounts: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: collapsedAccountsKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: collapsedAccountsKey) }
+    }
+
+    /// 折叠的服务键集合（"<账号ID>:<服务ID>"，目前只有 Agent Plan 可折叠）。
+    private static let collapsedServicesKey = "collapsedServices"
+    static var collapsedServices: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: collapsedServicesKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: collapsedServicesKey) }
+    }
+
     /// Agent Plan 卡片紧凑样式开关。默认 false = 标准样式（现有布局原样）。
     private static let compactLayoutKey = "agentPlanCompactLayout"
     static var agentPlanCompactLayout: Bool {

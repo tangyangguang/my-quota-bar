@@ -39,6 +39,50 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(neg.remainingPercent, 100)
     }
 
+    // MARK: - 折叠摘要短标签
+
+    func testAgentPlanPeriodShortName() {
+        XCTAssertEqual(AgentPlanPeriod(label: "5h", used: 0, total: 1, percent: 0, resetAt: nil).shortName, "5h")
+        XCTAssertEqual(AgentPlanPeriod(label: "weekly", used: 0, total: 1, percent: 0, resetAt: nil).shortName, "周")
+        XCTAssertEqual(AgentPlanPeriod(label: "monthly", used: 0, total: 1, percent: 0, resetAt: nil).shortName, "月")
+        // 未知窗口回退完整显示名，不误写
+        XCTAssertEqual(AgentPlanPeriod(label: "yearly", used: 0, total: 1, percent: 0, resetAt: nil).shortName, "yearly")
+    }
+
+    func testSpeechPackShortName() {
+        let asr = SpeechPack(title: "语音识别 ASR", purchased: "20 小时", used: "1 小时",
+                             unit: "小时", purchasedValue: 20, usedValue: 1, expires: "", type: "")
+        let tts = SpeechPack(title: "语音合成 TTS", purchased: "20000 次", used: "10 次",
+                             unit: "次", purchasedValue: 20000, usedValue: 10, expires: "", type: "")
+        XCTAssertEqual(asr.shortName, "ASR")
+        XCTAssertEqual(tts.shortName, "TTS")
+    }
+
+    func testSummaryBuilderBuildsMetricsFromAccount() {
+        let plan = AgentPlan(tier: "medium", edition: "personal", unit: "AFP", userName: nil, accountID: nil,
+                             periods: [
+                                AgentPlanPeriod(label: "5h", used: 20, total: 100, percent: 20, resetAt: nil),
+                                AgentPlanPeriod(label: "weekly", used: 50, total: 100, percent: 50, resetAt: nil)
+                             ])
+        let speech = SpeechPack(title: "语音识别 ASR", purchased: "20 小时", used: "5 小时",
+                                unit: "小时", purchasedValue: 20, usedValue: 5, expires: "", type: "")
+        let account = Account(id: "acc1", platform: "火山引擎", defaultName: "张三", idTail: nil,
+                              fullID: nil, alias: nil,
+                              services: [
+                                Service(id: "agent-plan", title: "Agent Plan", content: .agentPlan(plan),
+                                        status: .ok, errorMessage: nil, updatedAt: nil),
+                                Service(id: "speech-asr", title: "语音识别 ASR", content: .speech(speech),
+                                        status: .ok, errorMessage: nil, updatedAt: nil)
+                              ])
+        let metrics = SummaryBuilder.metrics(for: account)
+        XCTAssertEqual(metrics.map(\.label), ["5h", "周", "ASR"])
+        let remaining = metrics.map(\.remaining)
+        XCTAssertEqual(remaining.count, 3)
+        XCTAssertEqual(remaining[0], 80, accuracy: 0.001)
+        XCTAssertEqual(remaining[1], 50, accuracy: 0.001)
+        XCTAssertEqual(remaining[2], 75, accuracy: 0.001)
+    }
+
     func testSpeechPackPercents() {
         let pack = SpeechPack(title: "语音识别 ASR", purchased: "20.00 小时", used: "8.79 小时",
                               unit: "小时", purchasedValue: 20, usedValue: 8.79,
