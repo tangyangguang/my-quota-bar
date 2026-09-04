@@ -113,6 +113,20 @@ final class AppModel {
         for c in accountConfigs {
             if let full = c.accountFullID { accountFullID_[c.id] = full }
         }
+        migrateKeychainAccessIfNeeded()
+    }
+
+    /// 一次性迁移：把 ad-hoc 时期创建的钥匙串项 ACL 重写为信任当前（证书签名）身份。
+    /// 见 Keychain.resetAccess；全部成功后打标记，不再重复。
+    private func migrateKeychainAccessIfNeeded() {
+        let flag = "keychainACLResigned_v1"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        var allOK = true
+        for c in accountConfigs {
+            if !Keychain.resetAccess(for: "ak_\(c.id)") { allOK = false }
+            if !Keychain.resetAccess(for: "sk_\(c.id)") { allOK = false }
+        }
+        if allOK { UserDefaults.standard.set(true, forKey: flag) }
     }
 
     // MARK: 账号配置 CRUD（设置窗口调用）

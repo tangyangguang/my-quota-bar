@@ -50,6 +50,35 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
+    /// 一次性迁移：把已有项的访问控制列表（ACL）重写为只信任当前应用身份。
+    /// 背景：ad-hoc 签名时期创建的项，ACL 记录的是旧（cdhash）身份；换成固定证书
+    /// 签名后旧 ACL 不会自动更新，导致每次启动/重建都弹授权。重写后 ACL 锚定到
+    /// 当前应用的 designated requirement（证书指纹），同证书签名的应用以后访问
+    /// 不再弹窗。**数据不读、不改、不经内存**，只替换访问控制。
+    /// - Returns: true = 项不存在（无需迁移）或重写成功；false = 用户拒绝或失败（下次启动再试）。
+    @discardableResult
+    static func resetAccess(for key: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key
+        ]
+        let probe = SecItemCopyMatching(query as CFDictionary, nil)
+        if probe == errSecItemNotFound { return true }
+        guard probe == errSecSuccess else { return false }
+
+        var trustedApp: SecTrustedApplication?
+        let trustStatus = SecTrustedApplicationCreateFromPath(nil, &trustedApp)
+        guard trustStatus == errSecSuccess, let trusted = trustedApp else { return false }
+        var access: SecAccess?
+        let aclStatus = SecAccessCreate("My Quota Bar" as CFString,
+                                       [trusted] as CFArray, &access)
+        guard aclStatus == errSecSuccess, let access else { return false }
+
+        return SecItemUpdate(query as CFDictionary,
+                             [kSecAttrAccess: access] as CFDictionary) == errSecSuccess
+    }
+
     static func delete(_ key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
