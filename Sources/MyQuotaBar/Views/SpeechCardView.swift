@@ -4,28 +4,63 @@ import SwiftUI
 /// 服务名 + 剩余% 由外层 ServiceCardView 放在同一行；这里只画进度条 + 已用/共 + 到期。
 struct SpeechCardView: View {
     let pack: SpeechPack
+    /// 紧凑样式：与 Agent Plan 紧凑周期行同排布（短名 44 宽 + 内嵌进度条 + 剩%，
+    /// 进度条左右边界与 Plan 对齐）；标准样式保持原全宽进度条布局。
+    var compact: Bool = false
 
     var body: some View {
         if pack.purchased.isEmpty {
             Text("未配置密钥或暂无资源包")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        } else if compact {
+            compactBody
         } else {
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressBar(fraction: pack.usedPercent / 100, color: QuotaColor.bar(pack.remainingPercent))
+            standardBody
+        }
+    }
 
-                HStack {
-                    Text("已用 \(pack.used) / \(pack.purchased)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    Spacer()
-                    if !pack.expires.isEmpty {
-                        Text("到期 \(pack.expires.prefix(10))")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+    /// 标准样式（原布局）：全宽进度条 + 已用/共 + 到期。
+    private var standardBody: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ProgressBar(fraction: pack.usedPercent / 100, color: QuotaColor.bar(pack.remainingPercent))
+
+            detailRow
+        }
+    }
+
+    /// 紧凑样式：与 Agent Plan 紧凑周期行一一对应（短名/进度条/剩% 一行，明细一行）。
+    private var compactBody: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(pack.shortName)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 44, alignment: .leading)
+                ProgressBar(fraction: pack.usedPercent / 100, color: QuotaColor.bar(pack.remainingPercent))
+                Text("剩 \(Formatting.percent(pack.remainingPercent))%")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(QuotaColor.bar(pack.remainingPercent))
+                    .monospacedDigit()
+            }
+
+            detailRow
+        }
+        // 与 Agent Plan 周期行相同的行内边距，保证进度条左右边界严格对齐。
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private var detailRow: some View {
+        HStack {
+            Text("已用 \(pack.used) / \(pack.purchased)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Spacer()
+            if !pack.expires.isEmpty {
+                Text("到期 \(pack.expires.prefix(10))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
     }

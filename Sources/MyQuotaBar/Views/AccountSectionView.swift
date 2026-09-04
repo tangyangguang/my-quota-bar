@@ -137,7 +137,7 @@ struct ServiceCardView: View {
                     AgentPlanCardView(plan: plan, account: account, service: service, model: model)
                 }
             case .speech(let pack):
-                SpeechCardView(pack: pack)
+                SpeechCardView(pack: pack, compact: model.agentPlanCompactLayout)
             }
 
             if service.status == .error, let msg = service.errorMessage {
@@ -183,7 +183,8 @@ struct ServiceCardView: View {
                 badge(pack.type)
             }
             Spacer()
-            if case .speech(let pack) = service.content, !pack.purchased.isEmpty {
+            // 语音标题行右侧的大「剩 X%」：标准样式显示（原样）；紧凑样式下移到进度条行内，标题行不重复。
+            if case .speech(let pack) = service.content, !pack.purchased.isEmpty, !model.agentPlanCompactLayout {
                 Text("剩 \(Formatting.percent(pack.remainingPercent))%")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(QuotaColor.bar(pack.remainingPercent))
