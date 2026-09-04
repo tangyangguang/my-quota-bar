@@ -9,7 +9,7 @@ struct AgentPlanCardView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: model.agentPlanCompactLayout ? 7 : 10) {
             ForEach(plan.periods) { period in
                 periodRow(period)
             }

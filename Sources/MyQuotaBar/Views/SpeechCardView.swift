@@ -20,13 +20,14 @@ struct SpeechCardView: View {
         }
     }
 
-    /// 标准样式（原布局）：全宽进度条 + 已用/共 + 到期。
+    /// 标准样式：进度条与 Agent Plan 标准周期行左右对齐（同样 8pt 行边距）。
     private var standardBody: some View {
         VStack(alignment: .leading, spacing: 4) {
             ProgressBar(fraction: pack.usedPercent / 100, color: QuotaColor.bar(pack.remainingPercent))
 
             detailRow
         }
+        .padding(.horizontal, 8)
     }
 
     /// 紧凑样式：与 Agent Plan 紧凑周期行一一对应（短名/进度条/剩% 一行，明细一行）。
@@ -47,7 +48,8 @@ struct SpeechCardView: View {
         }
         // 与 Agent Plan 周期行相同的行内边距，保证进度条左右边界严格对齐。
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        // 语音条目只有一条（无相邻行），垂直边距减半，避免单个条目上下显得空。
+        .padding(.vertical, 3)
     }
 
     private var detailRow: some View {
