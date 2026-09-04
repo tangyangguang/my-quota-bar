@@ -31,12 +31,6 @@ struct AccountSectionView: View {
 
     private var header: some View {
         HStack(spacing: 5) {
-            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 10)
-                .opacity(chevronVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: chevronVisible)
             Image(systemName: "person.crop.circle")
                 .imageScale(.small)
                 .foregroundStyle(.secondary)
@@ -64,6 +58,17 @@ struct AccountSectionView: View {
         .onTapGesture { model.toggleAccountCollapsed(account.id) }
         .onHover { hovered = $0 }
         .help(isCollapsed ? "点击展开账号" : "点击折叠账号")
+        // chevron 浮在左侧边距里，不占排版空间：账号名始终在最左。
+        .overlay(alignment: .leading) {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+                .offset(x: -13)
+                .allowsHitTesting(false)
+                .opacity(chevronVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.12), value: chevronVisible)
+        }
     }
 
     /// 折叠态摘要小卡：一行带色指标，信息与展开态同源。
@@ -169,14 +174,6 @@ struct ServiceCardView: View {
     @ViewBuilder
     private var titleRow: some View {
         HStack(spacing: 6) {
-            if isAgentPlan {
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 10)
-                    .opacity(chevronVisible ? 1 : 0)
-                    .animation(.easeOut(duration: 0.12), value: chevronVisible)
-            }
             Text(service.title)
                 .font(.system(size: 12, weight: .semibold))
             if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
@@ -200,6 +197,19 @@ struct ServiceCardView: View {
             }
         }
         .help(isAgentPlan ? (isCollapsed ? "点击展开套餐详情" : "点击折叠为摘要") : "")
+        // chevron 浮在卡片左边距里，不占排版空间：服务名/进度条始终与最左对齐。
+        .overlay(alignment: .leading) {
+            if isAgentPlan {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                    .offset(x: -19)
+                    .allowsHitTesting(false)
+                    .opacity(chevronVisible ? 1 : 0)
+                    .animation(.easeOut(duration: 0.12), value: chevronVisible)
+            }
+        }
     }
 
     @ViewBuilder
