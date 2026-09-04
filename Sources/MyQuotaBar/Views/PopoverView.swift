@@ -118,6 +118,20 @@ struct PopoverView: View {
 
             Spacer()
 
+            Button {
+                model.agentPlanCompactLayout.toggle()
+            } label: {
+                Label(model.agentPlanCompactLayout ? "标准样式" : "紧凑样式",
+                      systemImage: model.agentPlanCompactLayout
+                      ? "rectangle.expand.vertical"
+                      : "rectangle.compress.vertical")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(model.agentPlanCompactLayout
+                  ? "当前为紧凑样式，点击切回标准样式"
+                  : "切换 Agent Plan 卡片紧凑样式")
+
             Button("退出") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)

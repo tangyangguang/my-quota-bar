@@ -65,8 +65,8 @@
 | 项 | 选择 |
 |----|------|
 | 语言 / UI | Swift 6 + SwiftUI `MenuBarExtra`（`.menuBarExtraStyle(.window)`） |
-| 构建 | SPM + `build-app.sh`，universal（arm64 + x86_64），ad-hoc 本地签名（`codesign --sign -`），无需 Apple Developer 账号 |
-| 分发 | 直接发 `outputs/My Quota Bar.app`。ad-hoc 签名未公证，对方首次打开需 `xattr -cr "路径"` 清除 quarantine（README 有说明）。**零 CLI 依赖，朋友只需填 AK/SK。** |
+| 构建 | SPM + `build-app.sh`，universal（arm64 + x86_64），本地自签名证书签名（证书名 `My Quota Bar Signing`，脚本首次运行自动生成并导入登录钥匙串，无需 Apple Developer 账号）。**不可退回 ad-hoc（`--sign -`）**：ad-hoc 身份随每次编译变化，钥匙串 AK/SK 会反复弹授权（每账号 2 次） |
+| 分发 | 直接发 `outputs/My Quota Bar.app`。自签证书未公证，对方首次打开需 `xattr -cr "路径"` 清除 quarantine（README 有说明）。**零 CLI 依赖，朋友只需填 AK/SK。** |
 | 认证 | 账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift` |
 | 凭证存储 | AK/SK 加密存 macOS 钥匙串（按账号 UUID 隔离）；非敏感配置存 UserDefaults(JSON) |
 | 定时刷新 | 全 App 单一非重复调度 Timer；按源计算 nextAttempt；最多 4 个账号并发；失败指数退避；分项失败保留旧值；休眠/断网感知；Timer tolerance 降耗 |
