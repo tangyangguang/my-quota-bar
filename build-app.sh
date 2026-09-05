@@ -19,9 +19,16 @@ bin_src="$project_dir/.build/apple/Products/Release/MyQuotaBar"
 if [[ ! -f "$bin_src" ]]; then
     bin_src="$project_dir/.build/release/MyQuotaBar"
 fi
+# 冻结式钥匙串助手（universal 与主程序同目录产物）
+helper_src="$project_dir/.build/apple/Products/Release/CredHelper"
+if [[ ! -f "$helper_src" ]]; then
+    helper_src="$project_dir/.build/release/CredHelper"
+fi
 cp "$bin_src" "$app_dir/Contents/MacOS/MyQuotaBar"
 cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
-chmod 755 "$app_dir/Contents/MacOS/MyQuotaBar"
+# 助手放在 Contents/MacOS，以 credhelper-v1 为名（主程序用 forAuxiliaryExecutable 查找）。
+cp "$helper_src" "$app_dir/Contents/MacOS/credhelper-v1"
+chmod 755 "$app_dir/Contents/MacOS/MyQuotaBar" "$app_dir/Contents/MacOS/credhelper-v1"
 
 xattr -cr "$app_dir"
 
@@ -60,4 +67,22 @@ EOF
 fi
 
 codesign --force --deep --sign "$sign_identity" "$app_dir"
+
+# 安装「冻结助手」到 Application Support：只在首次安装，之后永不覆盖、永不再签。
+# 它的二进制哈希因此恒定，用户对它点一次「始终允许」即永久有效；主程序每次重编译
+# 哈希会变，但只通过这个固定助手访问钥匙串，所以不再弹授权。
+frozen_dir="$HOME/Library/Application Support/My Quota Bar"
+frozen_helper="$frozen_dir/credhelper-v1"
+if [[ ! -x "$frozen_helper" ]]; then
+    echo "首次安装冻结钥匙串助手：$frozen_helper"
+    mkdir -p "$frozen_dir"
+    chmod 700 "$frozen_dir"
+    cp "$helper_src" "$frozen_helper"
+    chmod 700 "$frozen_helper"
+    # -i 让助手与主程序同一签名标识（DR = identifier local.my.quota-bar + 同一证书），
+    # 这样它与主程序、以及迁移后重锚的条目都属同一稳定身份。
+    codesign --force --sign "$sign_identity" -i "local.my.quota-bar" "$frozen_helper"
+fi
+# 一次性把旧条目 ACL 重锚到冻结助手身份（终端上下文中证书程序改 ACL 静默）。幂等，失败不中断构建。
+"$frozen_helper" migrate-all >/dev/null 2>&1 || true
 echo "$app_dir"

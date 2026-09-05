@@ -2,92 +2,105 @@ import Foundation
 import Security
 
 /// macOS 钥匙串存取工具，用来安全保存各账号的 AK/SK。
-/// 数据存在登录钥匙串里，纯本地，不上传。
+///
+/// 关键设计：本进程**不直接调用 Security 框架访问钥匙串**，而是通过一个签名一次、
+/// 之后永不再编译的「冻结助手」credhelper-v1 访问。原因：自签名/ad-hoc 签名的图形化
+/// app 访问钥匙串时，系统按二进制哈希（cdhash）记忆授权，而主程序每次重编译哈希都变，
+/// 会反复弹「始终允许」。冻结助手的二进制恒定，用户只需对它授权一次即永久有效；主程序
+/// 怎么重编译都不再碰钥匙串，因此不再弹窗。助手还会校验调用方必须是同一证书签名的本 app。
 enum Keychain {
-    private static let service = "local.my.quota-bar"
+    private static let helperName = "credhelper-v1"
 
-    /// 原地更新已有凭证；不存在时才新增。绝不先删旧值，避免新增失败导致凭证丢失。
+    /// 冻结助手的稳定安装路径（Application Support）。签名一次后永不覆盖。
+    private static var installedHelperURL: URL? {
+        let fm = FileManager.default
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        return appSupport
+            .appendingPathComponent("My Quota Bar", isDirectory: true)
+            .appendingPathComponent(helperName)
+    }
+
+    /// 确保冻结助手已就位：已存在则直接用（保持冻结）；否则从 app 包内复制并用固定
+    /// 自签证书签名一次。返回助手可执行文件 URL。
+    private static func ensureHelperInstalled() -> URL? {
+        let fm = FileManager.default
+        if let url = installedHelperURL, fm.isExecutableFile(atPath: url.path) {
+            return url
+        }
+        guard let bundled = Bundle.main.url(forAuxiliaryExecutable: helperName) else { return nil }
+        guard let dest = installedHelperURL else { return nil }
+        do {
+            try fm.createDirectory(at: dest.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            try fm.copyItem(at: bundled, to: dest)
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dest.path)
+            sign(helper: dest)   // 签名一次；此后永不再签（二进制冻结）
+            return dest
+        } catch {
+            return nil
+        }
+    }
+
+    /// 用固定自签证书签名助手。证书私钥在生成时已授权 /usr/bin/codesign 使用，静默完成。
+    /// -i 让助手与主程序同一签名标识（identifier local.my.quota-bar = 同一 DR）。
+    private static func sign(helper url: URL) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        p.arguments = ["--force", "--sign", "My Quota Bar Signing", "-i", "local.my.quota-bar", url.path]
+        try? p.run()
+        p.waitUntilExit()
+    }
+
+    /// 调用助手。返回 stdout（可能为空）表示成功；nil 表示调用失败。
+    /// value 非 nil 时经 stdin 传入（避免密钥出现在命令行参数里）。
+    @discardableResult
+    private static func runHelper(_ command: String, key: String, value: String? = nil) -> Data? {
+        guard let url = ensureHelperInstalled() else { return nil }
+        let p = Process()
+        p.executableURL = url
+        p.arguments = [command, key]
+        let stdout = Pipe()
+        p.standardOutput = stdout
+        p.standardError = Pipe()
+        if value != nil { p.standardInput = Pipe() }
+        do {
+            try p.run()
+            if let value, let input = p.standardInput as? Pipe {
+                input.fileHandleForWriting.write(Data(value.utf8))
+                try? input.fileHandleForWriting.close()
+            }
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return p.terminationStatus == 0 ? data : nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// 空值=删除；非空=原地更新或新增（具体更新/新增逻辑在助手内，绝不先删旧值）。
     static func set(_ value: String, for key: String) throws {
-        guard !value.isEmpty else {
+        if value.isEmpty {
             try delete(key)
             return
         }
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key
-        ]
-        let attributes: [String: Any] = [
-            kSecValueData as String: Data(value.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else {
-            throw PersistenceError.keychain(operation: "更新", status: updateStatus)
-        }
-
-        var add = query
-        for (key, value) in attributes { add[key] = value }
-        let addStatus = SecItemAdd(add as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw PersistenceError.keychain(operation: "保存", status: addStatus)
+        guard runHelper("set", key: key, value: value) != nil else {
+            throw PersistenceError.keychain(operation: "保存", status: errSecMissingValue)
         }
     }
 
     static func get(_ key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    /// 一次性迁移：把已有项的访问控制列表（ACL）重写为只信任当前应用身份。
-    /// 背景：ad-hoc 签名时期创建的项，ACL 记录的是旧（cdhash）身份；换成固定证书
-    /// 签名后旧 ACL 不会自动更新，导致每次启动/重建都弹授权。重写后 ACL 锚定到
-    /// 当前应用的 designated requirement（证书指纹），同证书签名的应用以后访问
-    /// 不再弹窗。**数据不读、不改、不经内存**，只替换访问控制。
-    /// - Returns: true = 项不存在（无需迁移）或重写成功；false = 用户拒绝或失败（下次启动再试）。
-    @discardableResult
-    static func resetAccess(for key: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key
-        ]
-        let probe = SecItemCopyMatching(query as CFDictionary, nil)
-        if probe == errSecItemNotFound { return true }
-        guard probe == errSecSuccess else { return false }
-
-        var trustedApp: SecTrustedApplication?
-        let trustStatus = SecTrustedApplicationCreateFromPath(nil, &trustedApp)
-        guard trustStatus == errSecSuccess, let trusted = trustedApp else { return false }
-        var access: SecAccess?
-        let aclStatus = SecAccessCreate("My Quota Bar" as CFString,
-                                       [trusted] as CFArray, &access)
-        guard aclStatus == errSecSuccess, let access else { return false }
-
-        return SecItemUpdate(query as CFDictionary,
-                             [kSecAttrAccess: access] as CFDictionary) == errSecSuccess
+        guard let data = runHelper("get", key: key) else { return nil }
+        let s = String(data: data, encoding: .utf8) ?? ""
+        return s.isEmpty ? nil : s
     }
 
     static func delete(_ key: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw PersistenceError.keychain(operation: "删除", status: status)
+        guard runHelper("delete", key: key) != nil else {
+            throw PersistenceError.keychain(operation: "删除", status: errSecMissingValue)
         }
     }
 }
