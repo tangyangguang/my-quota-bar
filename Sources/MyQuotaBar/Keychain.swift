@@ -10,6 +10,9 @@ import Security
 /// 怎么重编译都不再碰钥匙串，因此不再弹窗。助手还会校验调用方必须是同一证书签名的本 app。
 enum Keychain {
     private static let helperName = "credhelper-v1"
+    /// `Process.waitUntilExit()` 在主线程会泵 RunLoop；若恰逢 SwiftUI 正在计算 body，
+    /// 会让 AttributeGraph 重入并触发 precondition failure。所有助手进程统一放到串行后台队列。
+    private static let helperQueue = DispatchQueue(label: "local.my-quota-bar.credhelper")
 
     /// 冻结助手的稳定安装路径（Application Support）。签名一次后永不覆盖。
     private static var installedHelperURL: URL? {
@@ -59,25 +62,27 @@ enum Keychain {
     /// value 非 nil 时经 stdin 传入（避免密钥出现在命令行参数里）。
     @discardableResult
     private static func runHelper(_ command: String, key: String, value: String? = nil) -> Data? {
-        guard let url = ensureHelperInstalled() else { return nil }
-        let p = Process()
-        p.executableURL = url
-        p.arguments = [command, key]
-        let stdout = Pipe()
-        p.standardOutput = stdout
-        p.standardError = Pipe()
-        if value != nil { p.standardInput = Pipe() }
-        do {
-            try p.run()
-            if let value, let input = p.standardInput as? Pipe {
-                input.fileHandleForWriting.write(Data(value.utf8))
-                try? input.fileHandleForWriting.close()
+        helperQueue.sync {
+            guard let url = ensureHelperInstalled() else { return nil }
+            let p = Process()
+            p.executableURL = url
+            p.arguments = [command, key]
+            let stdout = Pipe()
+            p.standardOutput = stdout
+            p.standardError = Pipe()
+            if value != nil { p.standardInput = Pipe() }
+            do {
+                try p.run()
+                if let value, let input = p.standardInput as? Pipe {
+                    input.fileHandleForWriting.write(Data(value.utf8))
+                    try? input.fileHandleForWriting.close()
+                }
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                return p.terminationStatus == 0 ? data : nil
+            } catch {
+                return nil
             }
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            return p.terminationStatus == 0 ? data : nil
-        } catch {
-            return nil
         }
     }
 

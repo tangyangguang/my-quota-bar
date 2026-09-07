@@ -671,8 +671,7 @@ struct AccountDetailView: View {
                         SpeechAppRow(
                             app: $app,
                             model: model,
-                            ak: currentCreds.ak,
-                            sk: currentCreds.sk,
+                            accountID: account.id,
                             onCommit: syncSpeechApps,
                             onDelete: {
                                 speechApps.removeAll { $0.id == app.id }
@@ -688,10 +687,6 @@ struct AccountDetailView: View {
     private var agentPlanBinding: Binding<Bool> {
         Binding(get: { account.enableAgentPlan },
                 set: { model.setAgentPlanEnabled(id: account.id, enabled: $0) })
-    }
-
-    private var currentCreds: (ak: String, sk: String) {
-        model.credentials(for: account.id)
     }
 
     // MARK: 辅助
@@ -735,8 +730,7 @@ struct AccountDetailView: View {
 struct SpeechAppRow: View {
     @Binding var app: SpeechAppDraft
     let model: AppModel
-    let ak: String
-    let sk: String
+    let accountID: String
     let onCommit: () -> Void
     let onDelete: () -> Void
 
@@ -760,8 +754,10 @@ struct SpeechAppRow: View {
                     onCommit()
                     Task {
                         state = .testing
+                        // 凭证只在用户点击测试时读取，绝不在 SwiftUI body 求值期间启动进程。
+                        let credentials = model.credentials(for: accountID)
                         let r = await model.testSpeechApp(
-                            ak: ak, sk: sk, appID: app.appID,
+                            ak: credentials.ak, sk: credentials.sk, appID: app.appID,
                             includeASR: app.enableASR, includeTTS: app.enableTTS)
                         state = r.ok ? .success(r.message) : .failure(r.message)
                     }
