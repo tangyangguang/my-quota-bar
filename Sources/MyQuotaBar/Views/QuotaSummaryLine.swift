@@ -92,6 +92,20 @@ enum SummaryBuilder {
         serviceGroups(for: account).flatMap(\.metrics)
     }
 
+    /// 任意单个服务的折叠摘要指标（套餐给各窗口一行内多指标，语音给单个指标）。
+    static func metrics(for service: Service) -> [SummaryMetric] {
+        switch service.content {
+        case .agentPlan(let plan):
+            return metrics(for: plan, serviceID: service.id)
+        case .codingPlan(let plan):
+            return metrics(for: plan, serviceID: service.id)
+        case .speech(let pack):
+            guard !pack.purchased.isEmpty else { return [] }
+            return [SummaryMetric(id: service.id, label: pack.shortName,
+                                  remaining: pack.remainingPercent)]
+        }
+    }
+
     /// 单个 Agent Plan 的摘要指标。
     static func metrics(for plan: AgentPlan, serviceID: String) -> [SummaryMetric] {
         plan.periods.map { p in

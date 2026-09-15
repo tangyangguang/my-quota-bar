@@ -296,6 +296,40 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(groups[2].metrics.map(\.label), ["ASR"])
     }
 
+    // MARK: - 单个服务折叠摘要（三种服务形态统一入口）
+
+    func testServiceCollapsedMetricsForAllContentKinds() {
+        let agent = AgentPlan(tier: "", edition: "personal", unit: "AFP", userName: nil, accountID: nil,
+                              periods: [AgentPlanPeriod(label: "5h", used: 20, total: 100, percent: 20, resetAt: nil)])
+        let agentService = Service(id: "agent-plan", title: "Agent Plan", content: .agentPlan(agent),
+                                   status: .ok, errorMessage: nil, updatedAt: nil)
+        XCTAssertEqual(SummaryBuilder.metrics(for: agentService).map(\.label), ["5h"])
+
+        let coding = CodingPlan(status: "Running", periods: [
+            CodingPlanPeriod(label: "session", usedPercent: 40, cap: 100, resetAt: nil)
+        ])
+        let codingService = Service(id: "coding-plan", title: "Coding Plan", content: .codingPlan(coding),
+                                    status: .ok, errorMessage: nil, updatedAt: nil)
+        let cm = SummaryBuilder.metrics(for: codingService)
+        XCTAssertEqual(cm.map(\.label), ["5h"])
+        XCTAssertEqual(cm[0].remaining, 60, accuracy: 0.001)
+
+        let asr = SpeechPack(title: "语音识别 ASR", purchased: "20 小时", used: "5 小时",
+                             unit: "小时", purchasedValue: 20, usedValue: 5, expires: "", type: "")
+        let speechService = Service(id: "speech-x-asr", title: "语音识别 ASR", content: .speech(asr),
+                                    status: .ok, errorMessage: nil, updatedAt: nil)
+        let sm = SummaryBuilder.metrics(for: speechService)
+        XCTAssertEqual(sm.map(\.label), ["ASR"])
+        XCTAssertEqual(sm[0].remaining, 75, accuracy: 0.001)
+
+        // 错误占位语音卡（无数值）折叠摘要为空，由视图显示占位文案
+        let empty = SpeechPack(title: "语音合成 TTS", purchased: "", used: "", unit: "",
+                               purchasedValue: 0, usedValue: 0, expires: "", type: "")
+        let errService = Service(id: "speech-x-err", title: "语音合成 TTS", content: .speech(empty),
+                                 status: .error, errorMessage: "x", updatedAt: nil)
+        XCTAssertTrue(SummaryBuilder.metrics(for: errService).isEmpty)
+    }
+
     // MARK: - Coding Plan 配置开关（后加字段：旧 JSON 无该键也必须可读）
 
     func testAccountConfigCodingPlanMissingKeyDecodesAsDisabled() throws {
