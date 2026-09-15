@@ -20,6 +20,7 @@
 - ✅ **多平台架构**：开放 `Platform` 标识 + `PlatformAdapter` 注册表（目前仅 `volcengine`）；未知平台原样保留，加新平台不破坏旧 schema。
 - ✅ **任意多账号**：每个账号一对 AK/SK，配置任意数量，可拖动排序。
 - ✅ **火山 Agent Plan**：AK/SK 直调 OpenAPI `GetAFPUsage`（**已彻底移除 arkcli 依赖**）。
+- ✅ **火山 Coding Plan**：AK/SK 直调 OpenAPI `GetCodingPlanUsage`；与 Agent Plan 同一账号可同时订阅、各自独立开关，展示逻辑与 Agent Plan 共用一套卡片。
 - ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度；**每个应用内 ASR / TTS 可分别独立开关**。
 - ✅ **测试驱动配置**：AK/SK、Agent Plan、每个语音应用都有独立「测试」按钮，绿/红反馈。
 - ✅ **设置「即时生效」**：改名 / 拨开关 / 增删语音应用 / 排序都立即落盘并刷新，无保存按钮；仅「更换密钥」先测试后保存。
@@ -34,7 +35,7 @@
        └─ 服务（Agent Plan / 语音应用1 / 语音应用2 / ...）
             └─ 该服务自己的额度信息（原样展示）
 ```
-- 面板顶层**按账号分组**，账号内先 Agent Plan 后语音。
+- 面板顶层**按账号分组**，账号内顺序为 Agent Plan → Coding Plan → 语音。
 - 面板平铺为默认形态；账号和 Agent Plan 卡支持**折叠**（用户手动、状态持久化、新账号默认展开）。折叠不是隐藏：折叠态必须保留一行带额度色的摘要（各窗口/ASR·TTS 的剩余%），数字与展开态同源同字号。折叠 chevron 展开态 hover 才显示、折叠态常显。
 - 账号名格式：面板里显示用户设的「账户名称」；平台名（如"火山引擎"）作为前缀语境。
 
@@ -84,6 +85,14 @@
 - **注**：响应无账号 ID，身份另走 STS `GetCallerIdentity` 单独查。
 - 实现：`AgentPlanProvider.swift`
 
+### 火山 Coding Plan —— AK/SK 直调 OpenAPI（已用真实账号验证 HTTP 200）
+- **接口**：`GET https://ark.cn-beijing.volcengineapi.com/?Action=GetCodingPlanUsage&Version=2024-01-01`
+- **Service** `ark`，**Region** `cn-beijing`（与 Agent Plan 同主机同签名）
+- **认证**：账号 AK/SK（`VolcSigner`）。注意 arkcli 走 BFF 时该接口要求 SSO STS，**AK/SK 直调 OpenAPI 网关实测可用**，不要据 arkcli 报错误判。
+- **返回**（照搬原样）：`Result.Status`（订阅生效为 `Running`，未订阅为 `Reclaimed` 且无 QuotaUsage）；`Result.QuotaUsage[]` 各项：`Level`（`session` / `weekly` / `monthly`，session 即官方 5 小时滚动窗口）、`Percent`（已用百分比）、`Cap`（百分比上限，实测 100）、`ResetTimestamp`（**秒级**，session 未起算时为 -1 → 不显示重置时间）。
+- **口径限制**：官方只给百分比，**不给绝对额度/单位**，卡片只展示 `已用 X%`/`剩 X%`/重置时间，禁止反推请求次数。`HasReward` / `RewardTotalPercent` 语义未确认，暂不展示。
+- 实现：`CodingPlanProvider.swift`
+
 ### 火山语音 ASR / TTS —— AK/SK 公开 OpenAPI（已验证 HTTP 200）
 - **接口**：`POST https://open.volcengineapi.com/?Action=ResourcePacksStatus&Version=2023-11-07`
 - **Service** `speech_saas_prod`，**Region** `cn-north-1`
@@ -105,10 +114,10 @@
 
 - **`Platform`**（开放标识 struct，Codable）：当前 `volcengine`。未知平台原样保留，`PlatformRegistry` 只公布当前可新建的平台。
 - **`PlatformAdapter`**（Platforms/）：声明平台凭证字段、身份测试和服务目录；当前实现 `VolcenginePlatformAdapter`。
-- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `speechApps[]` / `iamIdentity?`（身份标记 "root" / "user:<名>"，测试连接后写入，`identityBadge` 显示为「主账号 / 子用户 · 名」）。合成 Codable；AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。**没有独立语音总开关**：`hasActiveSpeech` 派生自 speechApps，`hasAnyService = enableAgentPlan || hasActiveSpeech`。
+- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `enableCodingPlan: Bool?`（后加字段，缺失键解为 nil=关，读取走 `isCodingPlanEnabled`，旧配置免迁移）/ `speechApps[]` / `iamIdentity?`（身份标记 "root" / "user:<名>"，测试连接后写入，`identityBadge` 显示为「主账号 / 子用户 · 名」）。合成 Codable；AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。**没有独立语音总开关**：`hasActiveSpeech` 派生自 speechApps，`hasAnyService = enableAgentPlan || hasActiveSpeech`。
 - **`SpeechApp`**：`id(UUID)` / `appID` / `label` / `enableASR` / `enableTTS`（合成 Codable）。`isActive` = AppID 为有效数字且 ASR/TTS 至少开一个；全不勾或 AppID 无效则不拉数、不出卡（配置仍保留）。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。取数时只请求开启的子服务，关掉的不出卡、不报错。
 - **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串。
-- **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.speech`)（QuotaModels.swift）。
+- **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.codingPlan` / `.speech`)（QuotaModels.swift）。Agent Plan 与 Coding Plan 的行视图共用 `PlanCardView`（入参 `PlanPeriodDisplay`，仅底部明细不同：AFP 绝对值 vs `已用 X%`）。
 
 ## 项目结构
 
@@ -133,11 +142,12 @@ my-quota-bar/
 │   ├── Providers/
 │   │   ├── VolcSigner.swift        # 共享 HMAC-SHA256 签名 + STS 身份查询
 │   │   ├── AgentPlanProvider.swift # Agent Plan 取数 + test()
+│   │   ├── CodingPlanProvider.swift# Coding Plan 取数（百分比窗口）+ test()
 │   │   └── SpeechProvider.swift    # 语音资源包分项并发取数 + test()
 │   └── Views/
 │       ├── PopoverView.swift       # 面板主视图（按账号分组平铺）
 │       ├── AccountSectionView.swift# 账号分组 + ServiceCardView 路由
-│       ├── AgentPlanCardView.swift # Agent Plan 展示卡片
+│       ├── PlanCardView.swift      # Agent/Coding Plan 共用卡片 + ProgressBar/倒计时
 │       ├── SpeechCardView.swift    # 语音展示卡片
 │       └── SettingsWindow.swift    # 设置窗口（账号主从布局 + 显示 Tab）
 ├── Tests/MyQuotaBarTests/
@@ -157,7 +167,7 @@ my-quota-bar/
   - 左边栏：账号列表（选中高亮 + **拖动排序**，影响面板顺序），左下 `+`(添加) / `−`(删除选中，二次确认)。选中切换无拦截。
   - 右侧**单页滚动**，三个平级分组（与官方「账号 → 服务域 → 服务实例」层级对齐）：
     - 「账号」：平台只读 / 名称（即时）/ 账号 ID / **「更换密钥…」按钮**（AK/SK 不常驻输入框）。
-    - 「套餐」：订阅套餐类服务，现在是 Agent Plan 卡片（`ServiceCardStyle`，开关 + 测试）；以后有别的套餐加这里。
+    - 「套餐」：订阅套餐类服务，Agent Plan 与 Coding Plan 两张同级卡片（均为 `ServiceCardStyle`，独立开关 + 测试）；以后有别的套餐加这里。
     - 「语音」：语音服务域。标题行右侧「添加应用」；下面每个语音应用（AppID）直接平铺成与 Agent Plan **同级**的 `ServiceCardStyle` 卡片，**没有语音总开关、没有包裹卡**。
 - **语音启用逻辑**：没有总开关。一个语音应用是否取数/显示，完全由它的 ASR/TTS 复选框决定——两个都不勾 = 不拉数、面板不显示（AppID/备注保留，等同关闭）；删除应用才彻底移除。
 - **更换密钥**：独立弹窗，预填当前 AK/SK；改后必须先「测试连接」通过才能「保存密钥」；密钥真的变了才清身份缓存并重拉（`changeCredentials`）。
@@ -173,7 +183,7 @@ my-quota-bar/
   ```
 - SwiftUI 在 `MenuBarExtra(.window)` 里的滚动区必须先测量内容并设置非零显式高度，避免 `ScrollView` 塌成 0；内容未超上限时使用自然高度，超出后才滚动。
 - **不得硬编码任何敏感信息**（AppID / AK / SK / 账号 ID）。仓库**公开**：AppID 用户填、AK/SK 存钥匙串、`pics/` 已 gitignore。
-- **刷新间隔**：内部仍按 `AppModel.RefreshSource`（agentPlan / speech）分别调度，但全 App 只用一个调度 Timer，禁止按账号创建 Timer；设置 UI 只暴露一个「刷新间隔」，写入时同时设置所有源。请求经并发闸门限制为最多 4 个账号并发。
+- **刷新间隔**：内部仍按 `AppModel.RefreshSource`（agentPlan / codingPlan / speech）分别调度，但全 App 只用一个调度 Timer，禁止按账号创建 Timer；设置 UI 只暴露一个「刷新间隔」，写入时同时设置所有源。请求经并发闸门限制为最多 4 个账号并发。
 - **设置交互一律即时生效**，不要再引入「保存按钮 + 草稿 + 未保存拦截」；唯一例外是更换密钥（先测试通过才写入）。
 - **关键纯逻辑必须有单测**（数值格式化、百分比除零保护、AFP 解析、显示名、倒计时文案、**schema 演进兼容**）。改相关逻辑后 `swift test` 确保绿。
 - **凭证持久化**：AK/SK 一次配好永久存钥匙串，编辑账号自动回填。Keychain 必须原地 update、检查 OSStatus；两项写入失败要回滚，禁止先删旧值。

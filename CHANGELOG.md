@@ -2,6 +2,13 @@
 
 ## 未发布
 
+### 新增：火山 Coding Plan 套餐卡片
+- 同一账号可同时订阅 Agent Plan 与 Coding Plan：设置「套餐」分组新增 **Coding Plan** 卡片，独立开关 + 「测试」按钮，侧边栏摘要显示 `Agent Plan · Coding Plan · 语音 ×N`。
+- 数据来源：火山 OpenAPI `GetCodingPlanUsage`（`ark` / `cn-beijing`，AK/SK 签名，已用真实账号验证 HTTP 200）。官方只给各窗口**已用百分比**与重置时间（秒级），不给绝对额度，因此卡片照搬百分比口径（`已用 X%` + 进度条 + `剩 X%` + 重置倒计时），不反推请求次数。
+- 窗口与 Agent Plan 对齐：session（官方口径即 5 小时滚动窗口）/ 每周 / 每月；session 未起算时官方返 `ResetTimestamp=-1`，不显示重置时间。未订阅返 `Status=Reclaimed` 且无 `QuotaUsage`，测试按钮提示「该账号未订阅 Coding Plan」。
+- 展示逻辑与 Agent Plan 完全一致：同一套标准/紧凑样式、折叠摘要（`5h/周/月`）、逐行钉选菜单栏指标（图标 `c.circle`）、错误态与重排顺序（Agent Plan → Coding Plan → 语音）。
+- 配置 schema 新增 `enableCodingPlan`（可选键，缺失即关），旧配置直接可读，无需迁移；刷新调度新增 `coding-plan` 源，设置页单一刷新间隔仍同时写入所有源。
+
 ### 修复：设置页改账户名时应用崩溃
 - 修复设置页重绘时同步启动钥匙串助手并在主线程调用 `Process.waitUntilExit()`，导致 SwiftUI `AttributeGraph` 重入后 `SIGABRT` 的问题。
 - 语音应用卡不再在 `body` 求值期间读取 AK/SK；只在用户点击「测试」时读取。所有钥匙串助手进程统一在串行后台队列等待，避免其他入口再次触发同类重入。

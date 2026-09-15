@@ -175,27 +175,35 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
     var alias: String           // 用户自定义别名（可空）
     var accountFullID: String?  // 测试连接后拿到的账号 ID（持久化，用于命名尾号）
     var enableAgentPlan: Bool   // 是否获取/展示 Agent Plan
+    /// 是否获取/展示 Coding Plan。后加字段用可选承载：合成 Codable 对缺失键解为 nil，
+    /// 旧配置无需迁移即可读取；nil 等同关闭。
+    var enableCodingPlan: Bool?
     var speechApps: [SpeechApp] // 语音应用列表（0..10）
     var iamIdentity: String?    // 身份标记："root"（主账号）/ "user:<名>"（子用户）；测试连接后写入
 
     init(id: String = UUID().uuidString, platform: Platform = .volcengine,
          alias: String = "", accountFullID: String? = nil,
-         enableAgentPlan: Bool = false, speechApps: [SpeechApp] = [],
+         enableAgentPlan: Bool = false, enableCodingPlan: Bool? = nil,
+         speechApps: [SpeechApp] = [],
          iamIdentity: String? = nil) {
         self.id = id
         self.platform = platform
         self.alias = alias
         self.accountFullID = accountFullID
         self.enableAgentPlan = enableAgentPlan
+        self.enableCodingPlan = enableCodingPlan
         self.speechApps = speechApps
         self.iamIdentity = iamIdentity
     }
+
+    /// Coding Plan 开关的非可选视图（nil = 旧配置，等同关闭）。
+    var isCodingPlanEnabled: Bool { enableCodingPlan ?? false }
 
     /// 是否有启用中的语音应用。
     var hasActiveSpeech: Bool { speechApps.contains { $0.isActive } }
 
     /// 该账号是否有任何会在面板展示的服务。
-    var hasAnyService: Bool { enableAgentPlan || hasActiveSpeech }
+    var hasAnyService: Bool { enableAgentPlan || isCodingPlanEnabled || hasActiveSpeech }
 
     /// 身份徽章文案：主账号 / 子用户 · 名称；未知返回 nil。
     var identityBadge: String? {

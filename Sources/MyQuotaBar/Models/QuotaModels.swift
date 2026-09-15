@@ -87,6 +87,7 @@ enum ServiceStatus: String, Sendable {
 /// 各服务的原生数据形态。新增服务在此加 case。
 enum ServiceContent: Equatable, Sendable {
     case agentPlan(AgentPlan)
+    case codingPlan(CodingPlan)
     case speech(SpeechPack)
 }
 
@@ -130,6 +131,50 @@ struct AgentPlanPeriod: Identifiable, Equatable, Sendable {
     var shortName: String {
         switch label {
         case "5h": return "5h"
+        case "weekly": return "周"
+        case "monthly": return "月"
+        default: return displayName
+        }
+    }
+}
+
+// MARK: - Coding Plan 原生结构
+//
+// 官方 GetCodingPlanUsage 只回各周期窗口的「已用百分比」，不回绝对额度/单位；
+// 照搬原样：只展示百分比 + 重置时间，不反推请求次数。
+
+struct CodingPlan: Equatable, Sendable {
+    var status: String                 // 官方 Status，如 "Running" / "Reclaimed"
+    var periods: [CodingPlanPeriod]
+}
+
+struct CodingPlanPeriod: Identifiable, Equatable, Sendable {
+    let label: String          // "session" / "weekly" / "monthly"
+    let usedPercent: Double    // 官方 Percent：已用百分比（0-100）
+    let cap: Double            // 官方 Cap：百分比上限（实测 100）
+    let resetAt: Date?         // 官方 ResetTimestamp（秒）；-1/0 = 尚未起算，为 nil
+
+    var id: String { label }
+
+    /// 中文显示名。官方 session 窗口即 5 小时滚动窗口，与 Agent Plan 的 5 小时口径一致。
+    var displayName: String {
+        switch label {
+        case "session": return "5 小时"
+        case "weekly": return "每周"
+        case "monthly": return "每月"
+        default: return label
+        }
+    }
+
+    /// 剩余百分比（0-100）。官方不直接给，按 Cap - 已用 计算并裁到合法区间。
+    var remainingPercent: Double {
+        max(0, min(cap, cap - usedPercent))
+    }
+
+    /// 折叠摘要行用的短标签，与 Agent Plan 同款窗口保持一致。
+    var shortName: String {
+        switch label {
+        case "session": return "5h"
         case "weekly": return "周"
         case "monthly": return "月"
         default: return displayName

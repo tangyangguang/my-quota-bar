@@ -42,6 +42,14 @@ enum SummaryBuilder {
                         remaining: p.remainingPercent
                     ))
                 }
+            case .codingPlan(let plan):
+                for p in plan.periods {
+                    result.append(SummaryMetric(
+                        id: "\(service.id)-\(p.label)",
+                        label: p.shortName,
+                        remaining: p.remainingPercent
+                    ))
+                }
             case .speech(let pack):
                 guard !pack.purchased.isEmpty else { continue }
                 result.append(SummaryMetric(
@@ -56,6 +64,17 @@ enum SummaryBuilder {
 
     /// 单个 Agent Plan 的摘要指标。
     static func metrics(for plan: AgentPlan, serviceID: String) -> [SummaryMetric] {
+        plan.periods.map { p in
+            SummaryMetric(
+                id: "\(serviceID)-\(p.label)",
+                label: p.shortName,
+                remaining: p.remainingPercent
+            )
+        }
+    }
+
+    /// 单个 Coding Plan 的摘要指标。
+    static func metrics(for plan: CodingPlan, serviceID: String) -> [SummaryMetric] {
         plan.periods.map { p in
             SummaryMetric(
                 id: "\(serviceID)-\(p.label)",

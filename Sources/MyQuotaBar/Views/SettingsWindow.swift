@@ -198,6 +198,7 @@ struct AccountRow: View {
     private var serviceSummary: String {
         var parts: [String] = []
         if config.enableAgentPlan { parts.append("Agent Plan") }
+        if config.isCodingPlanEnabled { parts.append("Coding Plan") }
         let activeSpeech = config.speechApps.filter { $0.isActive }.count
         if activeSpeech > 0 { parts.append("语音 ×\(activeSpeech)") }
         return parts.isEmpty ? "未配置服务" : parts.joined(separator: " · ")
@@ -499,6 +500,7 @@ struct AccountDetailView: View {
 
     @State private var speechApps: [SpeechAppDraft] = []
     @State private var agentTestState = TestState.idle
+    @State private var codingTestState = TestState.idle
     @State private var showCredSheet = false
     // 更换密钥成功后 +1，用于强制重建服务行、清掉旧的测试结果。
     @State private var serviceEpoch = 0
@@ -519,6 +521,7 @@ struct AccountDetailView: View {
         .sheet(isPresented: $showCredSheet) {
             ChangeCredentialsSheet(model: model, accountID: account.id, platform: account.platform) {
                 agentTestState = .idle
+                codingTestState = .idle
                 serviceEpoch += 1
             }
         }
@@ -635,6 +638,34 @@ struct AccountDetailView: View {
                 }
             }
             .modifier(ServiceCardStyle())
+
+            // Coding Plan：与 Agent Plan 同级的订阅套餐，同一套窗口展示逻辑。
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: "c.circle.fill").foregroundStyle(.secondary)
+                    Text("Coding Plan").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Button {
+                        Task { await testCodingPlan() }
+                    } label: {
+                        if case .testing = codingTestState {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label("测试", systemImage: "bolt.horizontal")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(codingTestState.isTesting)
+                    Toggle("", isOn: codingPlanBinding).labelsHidden()
+                }
+                HStack(spacing: 8) {
+                    Text("套餐额度：5 小时 / 每周 / 每月（百分比）")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    CompactTestStateLabel(state: codingTestState)
+                }
+            }
+            .modifier(ServiceCardStyle())
         }
     }
 
@@ -689,6 +720,11 @@ struct AccountDetailView: View {
                 set: { model.setAgentPlanEnabled(id: account.id, enabled: $0) })
     }
 
+    private var codingPlanBinding: Binding<Bool> {
+        Binding(get: { account.isCodingPlanEnabled },
+                set: { model.setCodingPlanEnabled(id: account.id, enabled: $0) })
+    }
+
     // MARK: 辅助
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
@@ -702,6 +738,13 @@ struct AccountDetailView: View {
         let cred = model.credentials(for: account.id)
         let r = await model.testAgentPlan(ak: cred.ak, sk: cred.sk)
         agentTestState = r.ok ? .success(r.message) : .failure(r.message)
+    }
+
+    private func testCodingPlan() async {
+        codingTestState = .testing
+        let cred = model.credentials(for: account.id)
+        let r = await model.testCodingPlan(ak: cred.ak, sk: cred.sk)
+        codingTestState = r.ok ? .success(r.message) : .failure(r.message)
     }
 
     private func load() {

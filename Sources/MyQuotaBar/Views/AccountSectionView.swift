@@ -114,15 +114,17 @@ struct ServiceCardView: View {
     @Bindable var model: AppModel
     @State private var hovered = false
 
-    private var isAgentPlan: Bool {
+    /// Agent Plan / Coding Plan 同属套餐卡，都支持折叠；语音卡不折叠。
+    private var isPlanCard: Bool {
         if case .agentPlan = service.content { return true }
+        if case .codingPlan = service.content { return true }
         return false
     }
     private var isCollapsed: Bool {
-        isAgentPlan && model.isServiceCollapsed(accountID: account.id, serviceID: service.id)
+        isPlanCard && model.isServiceCollapsed(accountID: account.id, serviceID: service.id)
     }
     /// chevron：折叠时常显；展开时仅 hover 卡片显示。语音卡不显示。
-    private var chevronVisible: Bool { isAgentPlan && (isCollapsed || hovered) }
+    private var chevronVisible: Bool { isPlanCard && (isCollapsed || hovered) }
 
     var body: some View {
         // 卡片内容（标题行 + 服务详情 + 错误信息）。
@@ -134,7 +136,15 @@ struct ServiceCardView: View {
                 if isCollapsed {
                     QuotaSummaryLine(metrics: SummaryBuilder.metrics(for: plan, serviceID: service.id))
                 } else {
-                    AgentPlanCardView(plan: plan, account: account, service: service, model: model)
+                    PlanCardView(periods: plan.periods.map { PlanPeriodDisplay.agent($0, unit: plan.unit) },
+                                 account: account, service: service, model: model)
+                }
+            case .codingPlan(let plan):
+                if isCollapsed {
+                    QuotaSummaryLine(metrics: SummaryBuilder.metrics(for: plan, serviceID: service.id))
+                } else {
+                    PlanCardView(periods: plan.periods.map { PlanPeriodDisplay.coding($0) },
+                                 account: account, service: service, model: model)
                 }
             case .speech(let pack):
                 SpeechCardView(pack: pack, compact: model.agentPlanCompactLayout)
@@ -153,7 +163,7 @@ struct ServiceCardView: View {
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
         .opacity(service.status == .error ? 0.7 : 1)
-        .onHover { if isAgentPlan { hovered = $0 } }
+        .onHover { if isPlanCard { hovered = $0 } }
 
         // 语音服务：整张 service 卡片是 1 个指标 → 整张可点击。
         // Agent Plan：每个 period 各自是 1 个指标 → 在 AgentPlanCardView 里逐行套 menuBarPinRow。
@@ -193,14 +203,14 @@ struct ServiceCardView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            if isAgentPlan {
+            if isPlanCard {
                 model.toggleServiceCollapsed(accountID: account.id, serviceID: service.id)
             }
         }
-        .help(isAgentPlan ? (isCollapsed ? "点击展开套餐详情" : "点击折叠为摘要") : "")
+        .help(isPlanCard ? (isCollapsed ? "点击展开套餐详情" : "点击折叠为摘要") : "")
         // chevron 浮在卡片左边距里，不占排版空间：服务名/进度条始终与最左对齐。
         .overlay(alignment: .leading) {
-            if isAgentPlan {
+            if isPlanCard {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)

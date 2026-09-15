@@ -63,11 +63,13 @@ final class AppModel {
     /// 刷新源（按服务类型分类，用于独立配置刷新间隔）。
     enum RefreshSource: String, CaseIterable, Sendable {
         case agentPlan = "agent-plan"
+        case codingPlan = "coding-plan"
         case speech = "speech"
 
         var displayName: String {
             switch self {
             case .agentPlan: return "火山引擎 · Agent Plan"
+            case .codingPlan: return "火山引擎 · Coding Plan"
             case .speech: return "火山引擎 · 语音服务"
             }
         }
@@ -143,6 +145,12 @@ final class AppModel {
                                 secretAccessKey: sk.trimmingCharacters(in: .whitespaces)).test()
     }
 
+    /// 测试某账号的 Coding Plan（用传入的 AK/SK，不依赖已保存）。
+    func testCodingPlan(ak: String, sk: String) async -> (ok: Bool, message: String) {
+        await CodingPlanProvider(accessKeyID: ak.trimmingCharacters(in: .whitespaces),
+                                 secretAccessKey: sk.trimmingCharacters(in: .whitespaces)).test()
+    }
+
     /// 测试某语音应用（用传入的 AK/SK + AppID），只验证开启的子服务。
     func testSpeechApp(ak: String, sk: String, appID: String,
                        includeASR: Bool, includeTTS: Bool) async -> (ok: Bool, message: String) {
@@ -211,6 +219,14 @@ final class AppModel {
     func setAgentPlanEnabled(id: String, enabled: Bool) {
         guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
         accountConfigs[idx].enableAgentPlan = enabled
+        persistConfigs()
+        reconfigureService(for: id)
+    }
+
+    /// 开关 Coding Plan。
+    func setCodingPlanEnabled(id: String, enabled: Bool) {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        accountConfigs[idx].enableCodingPlan = enabled
         persistConfigs()
         reconfigureService(for: id)
     }
@@ -294,6 +310,16 @@ final class AppModel {
                             groupLabel: account.displayName,
                             optionLabel: period.displayName,
                             symbol: "a.circle",
+                            display: .percent(period.remainingPercent)
+                        ))
+                    }
+                case .codingPlan(let plan):
+                    for period in plan.periods {
+                        metrics.append(MenuBarMetric(
+                            id: metricID(account: account, service: service, sub: period.label),
+                            groupLabel: account.displayName,
+                            optionLabel: period.displayName,
+                            symbol: "c.circle",
                             display: .percent(period.remainingPercent)
                         ))
                     }
@@ -485,6 +511,7 @@ final class AppModel {
     /// 全量刷新所有账号所有启用的服务。
     func refresh() {
         refreshSource(.agentPlan)
+        refreshSource(.codingPlan)
         refreshSource(.speech)
     }
 
@@ -519,6 +546,8 @@ final class AppModel {
                 switch source {
                 case .agentPlan where config.enableAgentPlan:
                     return (config, accountRevisions[config.id, default: 0])
+                case .codingPlan where config.isCodingPlanEnabled:
+                    return (config, accountRevisions[config.id, default: 0])
                 case .speech where config.hasActiveSpeech:
                     return (config, accountRevisions[config.id, default: 0])
                 default:
@@ -535,6 +564,8 @@ final class AppModel {
                         switch source {
                         case .agentPlan:
                             ok = await self.fetchAgentPlan(for: config, revision: revision)
+                        case .codingPlan:
+                            ok = await self.fetchCodingPlan(for: config, revision: revision)
                         case .speech:
                             ok = await self.fetchSpeech(for: config, revision: revision)
                         }
@@ -586,6 +617,9 @@ final class AppModel {
             var anyOK = false
             if config.enableAgentPlan {
                 anyOK = await fetchAgentPlan(for: config, revision: revision) || anyOK
+            }
+            if config.isCodingPlanEnabled {
+                anyOK = await fetchCodingPlan(for: config, revision: revision) || anyOK
             }
             if config.hasActiveSpeech {
                 anyOK = await fetchSpeech(for: config, revision: revision) || anyOK
@@ -640,7 +674,32 @@ final class AppModel {
         } catch {
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
             markServiceError(config: config, serviceID: "agent-plan",
-                             serviceTitle: "Agent Plan", agentPlan: true,
+                             serviceTitle: "Agent Plan", kind: .agentPlan,
+                             message: error.localizedDescription)
+            return false
+        }
+    }
+
+    private func fetchCodingPlan(for config: AccountConfig, revision: Int) async -> Bool {
+        guard config.platform == .volcengine else { return false }
+        let ak = AccountStore.accessKeyID(for: config.id)
+        let sk = AccountStore.secretAccessKey(for: config.id)
+        guard !ak.isEmpty, !sk.isEmpty else { return false }
+        await ensureAccountID(config, ak: ak, sk: sk, revision: revision)
+        guard isCurrent(accountID: config.id, revision: revision) else { return false }
+        let provider = CodingPlanProvider(accessKeyID: ak, secretAccessKey: sk)
+        do {
+            let plan = try await provider.fetch()
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            let service = Service(id: "coding-plan", title: "Coding Plan",
+                                  content: .codingPlan(plan), status: .ok,
+                                  errorMessage: nil, updatedAt: Date())
+            upsertService(config: config, service: service)
+            return true
+        } catch {
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            markServiceError(config: config, serviceID: "coding-plan",
+                             serviceTitle: "Coding Plan", kind: .codingPlan,
                              message: error.localizedDescription)
             return false
         }
@@ -770,22 +829,38 @@ final class AppModel {
     private func sortServices(accountID: String) {
         guard let ai = accounts.firstIndex(where: { $0.id == accountID }) else { return }
         accounts[ai].services.sort { a, b in
-            func rank(_ id: String) -> Int { id == "agent-plan" ? 0 : 1 }
+            func rank(_ id: String) -> Int {
+                switch id {
+                case "agent-plan": return 0
+                case "coding-plan": return 1
+                default: return 2
+                }
+            }
             return rank(a.id) < rank(b.id)
         }
     }
 
+    private enum ErrorCardKind {
+        case agentPlan, codingPlan, speech
+    }
+
     private func markServiceError(config: AccountConfig, serviceID: String,
-                                  serviceTitle: String, agentPlan: Bool, message: String) {
+                                  serviceTitle: String, kind: ErrorCardKind, message: String) {
         if let ai = accounts.firstIndex(where: { $0.id == config.id }),
            let si = accounts[ai].services.firstIndex(where: { $0.id == serviceID }) {
             accounts[ai].services[si].status = .error
             accounts[ai].services[si].errorMessage = message
         } else {
-            let content: ServiceContent = agentPlan
-                ? .agentPlan(AgentPlan(tier: "", edition: "", unit: "AFP", periods: []))
-                : .speech(SpeechPack(title: serviceTitle, purchased: "", used: "", unit: "",
-                                     purchasedValue: 0, usedValue: 0, expires: "", type: ""))
+            let content: ServiceContent
+            switch kind {
+            case .agentPlan:
+                content = .agentPlan(AgentPlan(tier: "", edition: "", unit: "AFP", periods: []))
+            case .codingPlan:
+                content = .codingPlan(CodingPlan(status: "", periods: []))
+            case .speech:
+                content = .speech(SpeechPack(title: serviceTitle, purchased: "", used: "", unit: "",
+                                             purchasedValue: 0, usedValue: 0, expires: "", type: ""))
+            }
             let service = Service(id: serviceID, title: serviceTitle, content: content,
                                   status: .error, errorMessage: message, updatedAt: nil)
             upsertService(config: config, service: service)

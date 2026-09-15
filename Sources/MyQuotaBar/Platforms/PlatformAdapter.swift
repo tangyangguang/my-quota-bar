@@ -45,6 +45,8 @@ struct VolcenginePlatformAdapter: PlatformAdapter {
     let services = [
         PlatformServiceDescriptor(id: "agent-plan", name: "Agent Plan",
                                   symbol: "a.circle", supportsMultipleInstances: false),
+        PlatformServiceDescriptor(id: "coding-plan", name: "Coding Plan",
+                                  symbol: "c.circle", supportsMultipleInstances: false),
         PlatformServiceDescriptor(id: "speech", name: "语音服务",
                                   symbol: "waveform", supportsMultipleInstances: true)
     ]

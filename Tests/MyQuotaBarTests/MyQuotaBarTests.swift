@@ -182,6 +182,110 @@ final class MyQuotaBarTests: XCTestCase {
         }
     }
 
+    // MARK: - Coding Plan API 解析（GetCodingPlanUsage 真实响应形态）
+
+    /// 139 账号刚订阅后的真实响应形态（RequestId 已替换为假值）。
+    private func codingJSON() -> Data {
+        let dict: [String: Any] = [
+            "ResponseMetadata": ["Action": "GetCodingPlanUsage", "Version": "2024-01-01",
+                                 "Service": "ark", "Region": "cn-beijing",
+                                 "RequestId": "fake-request-id"],
+            "Result": [
+                "Status": "Running",
+                "UpdateTimestamp": 1789443993,
+                "QuotaUsage": [
+                    ["Level": "session", "Percent": 0, "ResetTimestamp": -1, "Cap": 100, "RewardTotalPercent": 0],
+                    ["Level": "weekly", "Percent": 0, "ResetTimestamp": 1789920000, "Cap": 100, "RewardTotalPercent": 0],
+                    ["Level": "monthly", "Percent": 0, "ResetTimestamp": 1792079999, "Cap": 100, "RewardTotalPercent": 0]
+                ],
+                "HasReward": false
+            ]
+        ]
+        return try! JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+    }
+
+    func testParseCodingPlanBasic() throws {
+        let plan = try CodingPlanProvider.parse(codingJSON())
+        XCTAssertEqual(plan.status, "Running")
+        XCTAssertEqual(plan.periods.map(\.label), ["session", "weekly", "monthly"])
+        XCTAssertEqual(plan.periods.map(\.displayName), ["5 小时", "每周", "每月"])
+        XCTAssertEqual(plan.periods.map(\.shortName), ["5h", "周", "月"])
+        // session 未起算（ResetTimestamp=-1）→ 无重置时间；时间戳是秒级
+        XCTAssertNil(plan.periods[0].resetAt)
+        XCTAssertEqual(plan.periods[1].resetAt?.timeIntervalSince1970 ?? 0, 1789920000, accuracy: 1)
+        XCTAssertEqual(plan.periods.allSatisfy { $0.cap == 100 }, true)
+        XCTAssertEqual(plan.periods[0].remainingPercent, 100)
+    }
+
+    func testParseCodingPlanRemainingPercent() {
+        // 已用 30%，剩余 70%；越界裁剪
+        let p = CodingPlanPeriod(label: "weekly", usedPercent: 30, cap: 100, resetAt: nil)
+        XCTAssertEqual(p.remainingPercent, 70, accuracy: 0.001)
+        let over = CodingPlanPeriod(label: "weekly", usedPercent: 120, cap: 100, resetAt: nil)
+        XCTAssertEqual(over.remainingPercent, 0)
+    }
+
+    func testParseCodingPlanUnsubscribedThrows() {
+        // 未订阅：HTTP 200，Status=Reclaimed，没有 QuotaUsage → emptyResult
+        let dict: [String: Any] = [
+            "ResponseMetadata": ["Action": "GetCodingPlanUsage"],
+            "Result": ["Status": "Reclaimed", "UpdateTimestamp": 1789444041, "HasReward": false]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+        XCTAssertThrowsError(try CodingPlanProvider.parse(data))
+    }
+
+    func testParseCodingPlanErrorResponse() throws {
+        let err: [String: Any] = [
+            "ResponseMetadata": ["Error": ["Code": "AuthFailure", "Message": "InvalidAccessKeyId"]]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: err, options: [.sortedKeys])
+        XCTAssertThrowsError(try CodingPlanProvider.parse(data)) { error in
+            XCTAssertEqual(error.localizedDescription, "命令执行失败：InvalidAccessKeyId")
+        }
+    }
+
+    // MARK: - Coding Plan 折叠摘要
+
+    func testSummaryBuilderBuildsCodingPlanMetrics() {
+        let plan = CodingPlan(status: "Running", periods: [
+            CodingPlanPeriod(label: "session", usedPercent: 10, cap: 100, resetAt: nil),
+            CodingPlanPeriod(label: "monthly", usedPercent: 25, cap: 100, resetAt: nil)
+        ])
+        let account = Account(id: "acc1", platform: "火山引擎", defaultName: "139", idTail: nil,
+                              fullID: nil, alias: nil,
+                              services: [
+                                Service(id: "coding-plan", title: "Coding Plan",
+                                        content: .codingPlan(plan), status: .ok,
+                                        errorMessage: nil, updatedAt: nil)
+                              ])
+        let metrics = SummaryBuilder.metrics(for: account)
+        XCTAssertEqual(metrics.map(\.label), ["5h", "月"])
+        XCTAssertEqual(metrics[0].remaining, 90, accuracy: 0.001)
+        XCTAssertEqual(metrics[1].remaining, 75, accuracy: 0.001)
+    }
+
+    // MARK: - Coding Plan 配置开关（后加字段：旧 JSON 无该键也必须可读）
+
+    func testAccountConfigCodingPlanMissingKeyDecodesAsDisabled() throws {
+        let old = """
+        {"id":"x","platform":"volcengine","alias":"","enableAgentPlan":true,"speechApps":[]}
+        """
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(old.utf8))
+        XCTAssertNil(config.enableCodingPlan)
+        XCTAssertFalse(config.isCodingPlanEnabled)
+        XCTAssertTrue(config.hasAnyService) // Agent Plan 仍在
+    }
+
+    func testAccountConfigCodingPlanRoundTrips() throws {
+        var orig = AccountConfig(id: "acc1", platform: .volcengine, enableAgentPlan: false)
+        orig.enableCodingPlan = true
+        let back = try JSONDecoder().decode(AccountConfig.self, from: JSONEncoder().encode(orig))
+        XCTAssertEqual(orig, back)
+        XCTAssertTrue(back.isCodingPlanEnabled)
+        XCTAssertTrue(back.hasAnyService)
+    }
+
     // MARK: - 账号显示名（别名 > 默认名 > “账号”，拼尾号）
 
     func testAccountDisplayName() {
@@ -200,7 +304,7 @@ final class MyQuotaBarTests: XCTestCase {
     func testPlatformRegistry() {
         XCTAssertEqual(PlatformRegistry.supportedPlatforms, [.volcengine])
         let adapter = PlatformRegistry.adapter(for: .volcengine)
-        XCTAssertEqual(adapter?.services.map(\.id), ["agent-plan", "speech"])
+        XCTAssertEqual(adapter?.services.map(\.id), ["agent-plan", "coding-plan", "speech"])
         XCTAssertEqual(adapter?.credentialFields.map(\.id), ["accessKeyID", "secretAccessKey"])
         XCTAssertNil(PlatformRegistry.adapter(for: Platform(rawValue: "future-platform")))
     }
