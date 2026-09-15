@@ -64,23 +64,25 @@ struct AccountSectionView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .frame(width: 10)
-                .offset(x: -13)
+                .offset(x: -16)
                 .allowsHitTesting(false)
                 .opacity(chevronVisible ? 1 : 0)
                 .animation(.easeOut(duration: 0.12), value: chevronVisible)
         }
     }
 
-    /// 折叠态摘要小卡：一行带色指标，信息与展开态同源。
+    /// 折叠态摘要小卡：一个套餐/服务占一行，信息与展开态同源。
     private var collapsedCard: some View {
-        let metrics = SummaryBuilder.metrics(for: account)
-        return HStack(spacing: 0) {
-            if metrics.isEmpty {
+        let groups = SummaryBuilder.serviceGroups(for: account)
+        return VStack(alignment: .leading, spacing: 6) {
+            if groups.isEmpty {
                 Text("暂无可显示的额度")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             } else {
-                QuotaSummaryLine(metrics: metrics)
+                ForEach(groups) { group in
+                    ServiceSummaryRow(symbol: group.symbol, metrics: group.metrics)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -215,7 +217,7 @@ struct ServiceCardView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
-                    .offset(x: -19)
+                    .offset(x: -24)
                     .allowsHitTesting(false)
                     .opacity(chevronVisible ? 1 : 0)
                     .animation(.easeOut(duration: 0.12), value: chevronVisible)

@@ -28,38 +28,68 @@ struct QuotaSummaryLine: View {
     }
 }
 
+/// 账号折叠态：一个套餐/服务占一行——服务小图标 + 该服务自己的摘要指标。
+struct ServiceSummaryRow: View {
+    let symbol: String
+    let metrics: [SummaryMetric]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .frame(width: 12)
+            QuotaSummaryLine(metrics: metrics)
+        }
+    }
+}
+
+/// 折叠摘要里按服务分的组（一组 = 折叠卡中的一行）。
+struct ServiceSummaryGroup: Identifiable, Equatable, Sendable {
+    let id: String
+    let symbol: String
+    let metrics: [SummaryMetric]
+}
+
 /// 从一个账号的全部服务构建折叠摘要指标。
 enum SummaryBuilder {
-    static func metrics(for account: Account) -> [SummaryMetric] {
-        var result: [SummaryMetric] = []
+    /// 按服务分组：一个套餐/服务 = 折叠卡里的一行。
+    static func serviceGroups(for account: Account) -> [ServiceSummaryGroup] {
+        var groups: [ServiceSummaryGroup] = []
         for service in account.services {
             switch service.content {
             case .agentPlan(let plan):
-                for p in plan.periods {
-                    result.append(SummaryMetric(
-                        id: "\(service.id)-\(p.label)",
-                        label: p.shortName,
-                        remaining: p.remainingPercent
-                    ))
-                }
+                groups.append(ServiceSummaryGroup(
+                    id: service.id, symbol: "a.circle",
+                    metrics: plan.periods.map { p in
+                        SummaryMetric(id: "\(service.id)-\(p.label)",
+                                      label: p.shortName, remaining: p.remainingPercent)
+                    }
+                ))
             case .codingPlan(let plan):
-                for p in plan.periods {
-                    result.append(SummaryMetric(
-                        id: "\(service.id)-\(p.label)",
-                        label: p.shortName,
-                        remaining: p.remainingPercent
-                    ))
-                }
+                groups.append(ServiceSummaryGroup(
+                    id: service.id, symbol: "c.circle",
+                    metrics: plan.periods.map { p in
+                        SummaryMetric(id: "\(service.id)-\(p.label)",
+                                      label: p.shortName, remaining: p.remainingPercent)
+                    }
+                ))
             case .speech(let pack):
                 guard !pack.purchased.isEmpty else { continue }
-                result.append(SummaryMetric(
+                groups.append(ServiceSummaryGroup(
                     id: service.id,
-                    label: pack.shortName,
-                    remaining: pack.remainingPercent
+                    symbol: pack.unit == "小时" ? "waveform" : "mic",
+                    metrics: [SummaryMetric(id: service.id, label: pack.shortName,
+                                            remaining: pack.remainingPercent)]
                 ))
             }
         }
-        return result
+        return groups
+    }
+
+    /// 拍平的全部指标（菜单栏/其他场景如需线性列表时使用）。
+    static func metrics(for account: Account) -> [SummaryMetric] {
+        serviceGroups(for: account).flatMap(\.metrics)
     }
 
     /// 单个 Agent Plan 的摘要指标。
