@@ -45,7 +45,7 @@ struct PopoverView: View {
             footer
         }
         .frame(width: 320)
-        .background(PopoverMaterial())
+        .background(PopoverPanelBackground())
     }
 
     private var platformGroups: [(name: String, accounts: [Account])] {
