@@ -8,6 +8,8 @@
     <string>My Quota Bar</string>
     <key>CFBundleExecutable</key>
     <string>MyQuotaBar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>local.my.quota-bar</string>
     <key>CFBundleInfoDictionaryVersion</key>

@@ -26,6 +26,8 @@ if [[ ! -f "$helper_src" ]]; then
 fi
 cp "$bin_src" "$app_dir/Contents/MacOS/MyQuotaBar"
 cp "$project_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
+mkdir -p "$app_dir/Contents/Resources"
+cp "$project_dir/Resources/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
 # 助手放在 Contents/MacOS，以 credhelper-v1 为名（主程序用 forAuxiliaryExecutable 查找）。
 cp "$helper_src" "$app_dir/Contents/MacOS/credhelper-v1"
 chmod 755 "$app_dir/Contents/MacOS/MyQuotaBar" "$app_dir/Contents/MacOS/credhelper-v1"

@@ -18,6 +18,7 @@ struct SettingsWindow: View {
                 .tabItem { Label("通用", systemImage: "gearshape") }
         }
         .frame(width: 720, height: 520)
+        .background(PanelColor.swiftUI)
     }
 }
 
@@ -50,6 +51,7 @@ struct AccountsTab: View {
             Divider()
             detail
         }
+        .background(PanelColor.swiftUI)
         .sheet(isPresented: $addingNew) {
             AddAccountSheet(model: model) { newID in selectedID = newID }
         }
@@ -103,6 +105,7 @@ struct AccountsTab: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
 
             Divider()
             HStack(spacing: 2) {
@@ -142,6 +145,7 @@ struct AccountsTab: View {
             .padding(.horizontal, 6).padding(.vertical, 4)
         }
         .frame(width: 190)
+        .background(PanelColor.swiftUI)
     }
 
     private func moveSelectedAccount(offset: Int) {
@@ -1006,6 +1010,8 @@ struct GeneralTab: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(PanelColor.swiftUI)
         .alert("开机启动设置失败", isPresented: errorBinding($launchError)) {
             Button("好") { launchError = nil }
         } message: {
