@@ -3,8 +3,17 @@ import Foundation
 /// Agent Plan 数据来源：直接调火山 OpenAPI GetAFPUsage，用 AK/SK 签名。
 /// 彻底甩掉 arkcli——朋友只需填 AK/SK，不用装任何命令行工具。
 struct AgentPlanProvider: Sendable {
-    let accessKeyID: String
-    let secretAccessKey: String
+    let credential: VolcCredential
+
+    /// AK/SK 账号便利构造（设置页测试沿用）。
+    init(accessKeyID: String, secretAccessKey: String) {
+        self.credential = VolcCredential(accessKeyID: accessKeyID,
+                                         secretAccessKey: secretAccessKey)
+    }
+
+    init(credential: VolcCredential) {
+        self.credential = credential
+    }
 
     private let host = "ark.cn-beijing.volcengineapi.com"
     private let region = "cn-beijing"
@@ -13,8 +22,7 @@ struct AgentPlanProvider: Sendable {
 
     func fetch() async throws -> AgentPlan {
         let signer = VolcSigner(
-            accessKeyID: accessKeyID, secretAccessKey: secretAccessKey,
-            host: host, region: region, service: service
+            credential: credential, host: host, region: region, service: service
         )
         let req = signer.makeRequest(
             method: "GET",

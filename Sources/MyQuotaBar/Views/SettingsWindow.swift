@@ -98,7 +98,9 @@ struct AccountsTab: View {
                 ForEach(groupedAccounts, id: \.platform) { group in
                     Section(group.platform.displayName) {
                         ForEach(group.accounts) { config in
-                            AccountRow(config: config).tag(config.id)
+                            AccountRow(config: config,
+                                      reauthNeeded: model.webReauthNeeded.contains(config.id))
+                                .tag(config.id)
                         }
                         .onMove { model.moveAccounts(in: group.platform, from: $0, to: $1) }
                     }
@@ -184,15 +186,29 @@ struct AccountsTab: View {
 /// 账号列表里的一行（左边栏）。
 struct AccountRow: View {
     let config: AccountConfig
+    var reauthNeeded: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "person.crop.circle")
                 .font(.title3).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(config.alias.isEmpty ? "未命名账号" : config.alias)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(config.alias.isEmpty ? "未命名账号" : config.alias)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if config.isWebLogin {
+                        Image(systemName: "globe")
+                            .font(.system(size: 9))
+                            .foregroundStyle(reauthNeeded ? Color.orange : Color.secondary)
+                            .help(reauthNeeded ? "网页登录已过期，需重新授权" : "网页登录账号（免 AK/SK）")
+                    }
+                    if reauthNeeded {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Text(serviceSummary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
         }
@@ -217,6 +233,7 @@ struct AddAccountSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var platform: Platform = .volcengine
+    @State private var authMethod: AuthMethod = .aksk
     @State private var ak = ""
     @State private var sk = ""
     @State private var credState = TestState.idle
@@ -225,10 +242,17 @@ struct AddAccountSheet: View {
     @State private var fetchedName: String?
     @State private var alias = ""
     @State private var saveError: String?
+    // 网页登录授权成功后的令牌结果（nil=还没授权）。
+    @State private var webResult: WebLoginResult?
 
     private var canSave: Bool {
-        !ak.trimmingCharacters(in: .whitespaces).isEmpty
-            && !sk.trimmingCharacters(in: .whitespaces).isEmpty
+        switch authMethod {
+        case .aksk:
+            return !ak.trimmingCharacters(in: .whitespaces).isEmpty
+                && !sk.trimmingCharacters(in: .whitespaces).isEmpty
+        case .web:
+            return webResult != nil
+        }
     }
 
     var body: some View {
@@ -248,31 +272,62 @@ struct AddAccountSheet: View {
                 }
 
                 GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        LabeledSecretField(label: "Access Key ID（AK）",
-                                           placeholder: "Access Key ID", text: $ak)
-                            .onChange(of: ak) { resetCred() }
-                        LabeledSecretField(label: "Secret Access Key（SK）",
-                                           placeholder: "Secret Access Key", text: $sk)
-                            .onChange(of: sk) { resetCred() }
-                        HStack(spacing: 8) {
-                            Button {
-                                Task { await testCredentials() }
-                            } label: {
-                                if case .testing = credState {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Text("测试连接")
+                    Picker("登录方式", selection: $authMethod) {
+                        Text("密钥 AK / SK").tag(AuthMethod.aksk)
+                        Text("网页登录（免密钥）").tag(AuthMethod.web)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                } label: {
+                    Label("登录方式", systemImage: "person.badge.key")
+                }
+
+                if authMethod == .aksk {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            LabeledSecretField(label: "Access Key ID（AK）",
+                                               placeholder: "Access Key ID", text: $ak)
+                                .onChange(of: ak) { resetCred() }
+                            LabeledSecretField(label: "Secret Access Key（SK）",
+                                               placeholder: "Secret Access Key", text: $sk)
+                                .onChange(of: sk) { resetCred() }
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task { await testCredentials() }
+                                } label: {
+                                    if case .testing = credState {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Text("测试连接")
+                                    }
+                                }
+                                .disabled(!canSave || credState.isTesting)
+                                stateLabel(credState)
+                            }
+                            Text("在火山引擎控制台「访问控制 → API 访问密钥」创建。加密存入 macOS 钥匙串，纯本地。建议先测试再保存。")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } label: {
+                        Label("火山引擎密钥（AK / SK）", systemImage: "key")
+                    }
+                } else {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            WebAuthorizeControl { result in
+                                webResult = result
+                                accountFullID = result.accountID
+                                iamIdentity = result.iamIdentity
+                                if alias.trimmingCharacters(in: .whitespaces).isEmpty {
+                                    alias = result.accountID
                                 }
                             }
-                            .disabled(!canSave || credState.isTesting)
-                            stateLabel(credState)
+                            Text("在火山官网登录授权，无需 AK/SK、无需实名认证。仅支持 Agent Plan / Coding Plan；登录每 48 小时需重新授权一次。")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Text("在火山引擎控制台「访问控制 → API 访问密钥」创建。加密存入 macOS 钥匙串，纯本地。建议先测试再保存。")
-                            .font(.caption2).foregroundStyle(.secondary)
+                    } label: {
+                        Label("网页登录授权", systemImage: "globe")
                     }
-                } label: {
-                    Label("火山引擎密钥（AK / SK）", systemImage: "key")
                 }
 
                 GroupBox {
@@ -302,7 +357,7 @@ struct AddAccountSheet: View {
             }
             .padding(12)
         }
-        .frame(width: 460, height: 400)
+        .frame(width: 460, height: 470)
         .alert("添加账号失败", isPresented: errorBinding($saveError)) {
             Button("好") { saveError = nil }
         } message: {
@@ -348,16 +403,25 @@ struct AddAccountSheet: View {
 
     private func save() {
         do {
-            let newID = try model.addAccount(
-                platform: platform,
-                alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
-                ak: ak.trimmingCharacters(in: .whitespaces),
-                sk: sk.trimmingCharacters(in: .whitespaces),
-                accountFullID: accountFullID,
-                iamIdentity: iamIdentity,
-                enableAgentPlan: false, speechApps: [])
-            onAdded(newID)
-            dismiss()
+            if authMethod == .web {
+                guard let webResult else { return }
+                let newID = try model.addWebAccount(
+                    result: webResult,
+                    alias: alias.trimmingCharacters(in: .whitespacesAndNewlines))
+                onAdded(newID)
+                dismiss()
+            } else {
+                let newID = try model.addAccount(
+                    platform: platform,
+                    alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+                    ak: ak.trimmingCharacters(in: .whitespaces),
+                    sk: sk.trimmingCharacters(in: .whitespaces),
+                    accountFullID: accountFullID,
+                    iamIdentity: iamIdentity,
+                    enableAgentPlan: false, speechApps: [])
+                onAdded(newID)
+                dismiss()
+            }
         } catch {
             saveError = error.localizedDescription
         }
@@ -506,16 +570,24 @@ struct AccountDetailView: View {
     @State private var agentTestState = TestState.idle
     @State private var codingTestState = TestState.idle
     @State private var showCredSheet = false
-    // 更换密钥成功后 +1，用于强制重建服务行、清掉旧的测试结果。
+    @State private var showWebReauthSheet = false
+    // 更换密钥/重授成功后 +1，用于强制重建服务行、清掉旧的测试结果。
     @State private var serviceEpoch = 0
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if account.isWebLogin && webTokenStale {
+                    webReauthBanner
+                }
                 accountGroup
                 if account.platform.isSupported {
                     planGroup
-                    speechGroup.id(serviceEpoch)
+                    if account.isWebLogin {
+                        webSpeechNote.id(serviceEpoch)
+                    } else {
+                        speechGroup.id(serviceEpoch)
+                    }
                 } else {
                     unsupportedPlatformView
                 }
@@ -529,8 +601,44 @@ struct AccountDetailView: View {
                 serviceEpoch += 1
             }
         }
+        .sheet(isPresented: $showWebReauthSheet) {
+            WebReauthorizeSheet(model: model, accountID: account.id) {
+                agentTestState = .idle
+                codingTestState = .idle
+                serviceEpoch += 1
+            }
+        }
         .onAppear(perform: load)
         .onDisappear(perform: syncSpeechApps)
+    }
+
+    /// 网页登录是否已过期（本地预判到 48h，或服务端已拒绝）。
+    private var webTokenStale: Bool {
+        account.isWebTokenExpired || model.webReauthNeeded.contains(account.id)
+    }
+
+    private var webReauthBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text("网页登录已过期，需重新授权后才能刷新额度。").font(.caption2).foregroundStyle(.orange)
+            Spacer()
+            Button("重新授权") { showWebReauthSheet = true }.controlSize(.small)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+    }
+
+    private var webSpeechNote: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("语音", systemImage: "waveform")
+            Label("网页登录账号仅支持 Agent Plan / Coding Plan；语音服务需要 AK/SK 凭证。",
+                  systemImage: "info.circle")
+                .font(.caption2).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        }
     }
 
     private var unsupportedPlatformView: some View {
@@ -556,12 +664,22 @@ struct AccountDetailView: View {
                             .frame(width: 40, alignment: .leading)
                         TextField("显示在面板上，可改成好认的名字", text: aliasBinding)
                             .textFieldStyle(.roundedBorder)
-                        Button {
-                            showCredSheet = true
-                        } label: {
-                            Label("更换密钥…", systemImage: "key")
+                        if account.isWebLogin {
+                            Button {
+                                showWebReauthSheet = true
+                            } label: {
+                                Label("重新授权…", systemImage: "globe")
+                            }
+                            .controlSize(.small)
+                            .help("网页登录每 48 小时需重新授权一次")
+                        } else {
+                            Button {
+                                showCredSheet = true
+                            } label: {
+                                Label("更换密钥…", systemImage: "key")
+                            }
+                            .controlSize(.small)
                         }
-                        .controlSize(.small)
                     }
                     // 行 2：平台 · 身份 · 账号 ID（紧凑一行，可复制）
                     HStack(spacing: 8) {
@@ -739,15 +857,13 @@ struct AccountDetailView: View {
 
     private func testAgentPlan() async {
         agentTestState = .testing
-        let cred = model.credentials(for: account.id)
-        let r = await model.testAgentPlan(ak: cred.ak, sk: cred.sk)
+        let r = await model.testPlan(id: account.id, kind: .agentPlan)
         agentTestState = r.ok ? .success(r.message) : .failure(r.message)
     }
 
     private func testCodingPlan() async {
         codingTestState = .testing
-        let cred = model.credentials(for: account.id)
-        let r = await model.testCodingPlan(ak: cred.ak, sk: cred.sk)
+        let r = await model.testPlan(id: account.id, kind: .codingPlan)
         codingTestState = r.ok ? .success(r.message) : .failure(r.message)
     }
 
@@ -1073,5 +1189,127 @@ struct LabeledSecretField: View {
                 .help(revealed ? "隐藏" : "显示")
             }
         }
+    }
+}
+
+// MARK: - 网页登录授权控件（添加账号 / 重新授权共用）
+
+/// 火山账号身份标记 → 中文短文案。
+private func webIdentityText(_ code: String?) -> String? {
+    guard let code else { return nil }
+    if code == "root" { return "主账号" }
+    if code.hasPrefix("user:") {
+        let name = String(code.dropFirst("user:".count))
+        return name.isEmpty ? "子用户" : "子用户 · \(name)"
+    }
+    return nil
+}
+
+/// 点按钮 → 打开浏览器走火山官方 OAuth → 自动回跳；成功显示账号并回调，失败显示原因。
+/// 纯本地：账号密码只输在火山官网，App 只收到授权后的令牌。
+struct WebAuthorizeControl: View {
+    /// 授权成功回调（主线程），由父视图决定新增账号还是重新绑定。
+    var onAuthorized: (WebLoginResult) -> Void
+
+    @State private var waiting = false
+    @State private var failure: String?
+    @State private var result: WebLoginResult?
+
+    private var buttonTitle: String {
+        if waiting { return "等待浏览器授权…" }
+        return result == nil ? "在浏览器中登录授权…" : "重新登录授权"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button {
+                    Task { await authorize() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if waiting { ProgressView().controlSize(.small) }
+                        Text(buttonTitle)
+                    }
+                }
+                .disabled(waiting)
+
+                if let result {
+                    Label("已授权 · …\(String(result.accountID.suffix(4)))" +
+                          (webIdentityText(result.iamIdentity).map { " · \($0)" } ?? ""),
+                          systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green).lineLimit(1)
+                }
+            }
+
+            if waiting {
+                Text("浏览器应已打开火山官方登录页；登录并同意授权后会自动回到本窗口。")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if let failure {
+                Label(failure, systemImage: "xmark.circle.fill")
+                    .font(.caption2).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @MainActor
+    private func authorize() async {
+        waiting = true
+        failure = nil
+        do {
+            let r = try await VolcWebAuth.runLogin()
+            result = r
+            waiting = false
+            onAuthorized(r)
+        } catch {
+            waiting = false
+            failure = error.localizedDescription
+        }
+    }
+}
+
+/// 对已有网页登录账号重新授权（refresh token 48h 过期后用）。
+struct WebReauthorizeSheet: View {
+    @Bindable var model: AppModel
+    let accountID: String
+    var onDone: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("重新网页授权").font(.headline).padding(.top, 16)
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("将在浏览器打开火山官方登录页，请登录原来的同一个账号完成授权。授权后有效期 48 小时。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                WebAuthorizeControl { result in
+                    do {
+                        try model.reauthorizeWeb(id: accountID, result: result)
+                        onDone()
+                        dismiss()
+                    } catch {
+                        failure = error.localizedDescription
+                    }
+                }
+                if let failure {
+                    Label(failure, systemImage: "xmark.circle.fill")
+                        .font(.caption2).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 440, height: 240)
     }
 }

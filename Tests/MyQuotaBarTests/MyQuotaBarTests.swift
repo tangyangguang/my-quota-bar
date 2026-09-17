@@ -491,4 +491,129 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertEqual(at(25 * 3600), "1 天 1 小时后重置")
         XCTAssertEqual(at(48 * 3600), "2 天后重置")
     }
+
+    // MARK: - 网页登录（OAuth 免 AK/SK）纯逻辑
+
+    /// 造一个给定 payload 的无签名 JWT（header.payload.signature，末段可任意）。
+    private func makeJWT(_ payload: [String: Any]) -> String {
+        let header = Base64URL.encode(try! JSONSerialization.data(
+            withJSONObject: ["alg": "RS256", "kid": "x"]))
+        let body = Base64URL.encode(try! JSONSerialization.data(withJSONObject: payload))
+        return "\(header).\(body).sig"
+    }
+
+    private let stsJSON =
+        "{\"access_key_id\":\"AKTPabc\",\"secret_access_key\":\"SKxyz\",\"session_token\":\"TOK\"}"
+
+    func testBase64URLRoundTrip() {
+        let data = Data([0xFB, 0xFF, 0x3F, 0x00, 0x2B, 0x2F])  // 含 + / = 的边界字节
+        let encoded = Base64URL.encode(data)
+        XCTAssertFalse(encoded.contains("+"))
+        XCTAssertFalse(encoded.contains("/"))
+        XCTAssertFalse(encoded.contains("="))
+        XCTAssertEqual(Base64URL.decode(encoded), data)
+    }
+
+    func testPKCEChallengeIsSHA256Base64URL() {
+        let verifier = VolcWebAuth.makeVerifier()
+        XCTAssertGreaterThanOrEqual(verifier.count, 43)
+        XCTAssertFalse(verifier.contains("="))
+        // 同一 verifier 的 challenge 稳定，且不同 verifier 产生不同 challenge。
+        XCTAssertEqual(VolcWebAuth.challenge(for: verifier), VolcWebAuth.challenge(for: verifier))
+        XCTAssertNotEqual(VolcWebAuth.challenge(for: verifier),
+                          VolcWebAuth.challenge(for: VolcWebAuth.makeVerifier()))
+        XCTAssertFalse(VolcWebAuth.makeState().isEmpty)
+    }
+
+    func testAuthorizeURLContainsPKCEAndLoopbackRedirect() throws {
+        let url = VolcWebAuth.authorizeURL(port: 51234, state: "ST", challenge: "CH")
+        let comps = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let dict = Dictionary(uniqueKeysWithValues: (comps.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(dict["client_id"], VolcWebAuth.clientID)
+        XCTAssertEqual(dict["response_type"], "code")
+        XCTAssertEqual(dict["redirect_uri"], "http://127.0.0.1:51234/oauth/callback")
+        XCTAssertEqual(dict["code_challenge"], "CH")
+        XCTAssertEqual(dict["code_challenge_method"], "S256")
+        XCTAssertEqual(dict["state"], "ST")
+    }
+
+    func testParseAccessSTSJSON() throws {
+        let cred = try VolcWebAuth.parseCredential(accessToken: stsJSON)
+        XCTAssertEqual(cred.accessKeyID, "AKTPabc")
+        XCTAssertEqual(cred.secretAccessKey, "SKxyz")
+        XCTAssertEqual(cred.sessionToken, "TOK")
+        XCTAssertThrowsError(try VolcWebAuth.parseCredential(accessToken: "not json"))
+        XCTAssertThrowsError(try VolcWebAuth.parseCredential(
+            accessToken: "{\"access_key_id\":\"\",\"secret_access_key\":\"x\",\"session_token\":\"y\"}"))
+    }
+
+    func testIdentityFromIDTokenRootAndSubUser() {
+        let root = VolcWebAuth.identity(from: makeJWT(["sub": "2132036550", "trn": "trn:iam::2132036550:root"]))
+        XCTAssertEqual(root?.accountID, "2132036550")
+        XCTAssertEqual(root?.iamIdentity, "root")
+
+        let subUser = VolcWebAuth.identity(from: makeJWT(["sub": "2100", "trn": "trn:iam::2100:user/alice"]))
+        XCTAssertEqual(subUser?.accountID, "2100")
+        XCTAssertEqual(subUser?.iamIdentity, "user:alice")
+
+        XCTAssertNil(VolcWebAuth.identity(from: "not.a.jwt"))
+        XCTAssertNil(VolcWebAuth.identity(from: makeJWT(["hello": "world"])))  // 无 sub/trn
+    }
+
+    func testJWTRefreshTokenExpiry() throws {
+        let exp = Date(timeIntervalSince1970: 1_800_000_000)
+        let jwt = makeJWT(["exp": 1_800_000_000.0])
+        let parsed = try XCTUnwrap(VolcWebAuth.jwtExpiry(jwt))
+        XCTAssertEqual(parsed.timeIntervalSince1970, exp.timeIntervalSince1970, accuracy: 1)
+        XCTAssertNil(VolcWebAuth.jwtExpiry("nope"))
+    }
+
+    // MARK: - AuthMethod schema 演进 + web 账号业务约束
+
+    func testAuthMethodDefaultsToAKSKForLegacyConfig() throws {
+        // 旧配置没有 authMethod / webTokenExpiresAt 键，解码后必须等同 AK/SK（不丢账号）。
+        let old = "{\"id\":\"a\",\"platform\":\"volcengine\",\"alias\":\"老账号\",\"enableAgentPlan\":true,\"speechApps\":[]}"
+        let config = try JSONDecoder().decode(AccountConfig.self, from: Data(old.utf8))
+        XCTAssertEqual(config.authMethod ?? .aksk, .aksk)
+        XCTAssertFalse(config.isWebLogin)
+        XCTAssertFalse(config.isWebTokenExpired)
+    }
+
+    func testWebLoginFlagsAndSpeechExclusion() throws {
+        let future = Date().addingTimeInterval(3600)
+        let web = AccountConfig(id: "w", enableAgentPlan: true, enableCodingPlan: true,
+                                authMethod: .web, webTokenExpiresAt: future)
+        XCTAssertTrue(web.isWebLogin)
+        XCTAssertFalse(web.isWebTokenExpired)
+        XCTAssertTrue(web.hasAnyService)
+        // 网页登录即使残留语音应用配置，调度层也不会为它拉语音（AppModel 已按 isWebLogin 排除）。
+
+        let expired = AccountConfig(id: "w2",
+                                    authMethod: .web,
+                                    webTokenExpiresAt: Date().addingTimeInterval(-10))
+        XCTAssertTrue(expired.isWebTokenExpired)
+
+        // 陌生 authMethod 原始值不致命，回落 aksk。
+        let weird = "{\"id\":\"z\",\"platform\":\"volcengine\",\"alias\":\"未来\",\"authMethod\":\"future-method\",\"enableAgentPlan\":false,\"speechApps\":[]}"
+        let decoded = try JSONDecoder().decode(AccountConfig.self, from: Data(weird.utf8))
+        XCTAssertEqual(decoded.authMethod, .aksk)
+    }
+
+    /// 刷新 STS 的响应不回传 refresh_token（不轮换），必须仍能解码，否则重启后网页账号必挂。
+    func testRefreshTokenResponseOmitsRefreshTokenField() throws {
+        // access_token 是「JSON 字符串」，内层引号需转义；响应中没有 refresh_token 键。
+        let inner = stsJSON.replacingOccurrences(of: "\"", with: "\\\"")
+        let payload = "{\"access_token\":\"\(inner)\",\"token_type\":\"bearer\"," +
+                      "\"expires_in\":900,\"id_token\":\"x.y.z\"}"
+        let resp = try JSONDecoder().decode(VolcWebAuth.TokenResponse.self, from: Data(payload.utf8))
+        XCTAssertNil(resp.refresh_token)
+        XCTAssertEqual(resp.expires_in, 900)
+        let cred = try VolcWebAuth.parseCredential(accessToken: resp.access_token)
+        XCTAssertEqual(cred.sessionToken, "TOK")
+    }
+
+    func testQuotaErrorWebReauthClassification() {
+        XCTAssertTrue(QuotaError.webReauthRequired("x").isWebReauthRequired)
+        XCTAssertFalse(QuotaError.commandFailed("x").isWebReauthRequired)
+    }
 }

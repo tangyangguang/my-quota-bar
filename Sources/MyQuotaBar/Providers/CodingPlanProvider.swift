@@ -7,8 +7,17 @@ import Foundation
 /// - ResetTimestamp 是秒级（AFP 是毫秒），session 窗口未起算时为 -1；
 /// - 未订阅时 HTTP 200 且 Status="Reclaimed"、无 QuotaUsage，按未订阅处理。
 struct CodingPlanProvider: Sendable {
-    let accessKeyID: String
-    let secretAccessKey: String
+    let credential: VolcCredential
+
+    /// AK/SK 账号便利构造（设置页测试沿用）。
+    init(accessKeyID: String, secretAccessKey: String) {
+        self.credential = VolcCredential(accessKeyID: accessKeyID,
+                                         secretAccessKey: secretAccessKey)
+    }
+
+    init(credential: VolcCredential) {
+        self.credential = credential
+    }
 
     private let host = "ark.cn-beijing.volcengineapi.com"
     private let region = "cn-beijing"
@@ -17,8 +26,7 @@ struct CodingPlanProvider: Sendable {
 
     func fetch() async throws -> CodingPlan {
         let signer = VolcSigner(
-            accessKeyID: accessKeyID, secretAccessKey: secretAccessKey,
-            host: host, region: region, service: service
+            credential: credential, host: host, region: region, service: service
         )
         let req = signer.makeRequest(
             method: "GET",

@@ -31,6 +31,24 @@ struct Platform: RawRepresentable, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
+// MARK: - 账号认证方式
+
+/// 火山账号的凭证方式。
+/// - `aksk`：用户填长期 Access Key / Secret Key（默认，老账号都是这种）。
+/// - `web`：浏览器网页授权（免 AK/SK、无需实名），凭 OAuth refresh token 换 15 分钟临时 STS；
+///   refresh token 硬有效期 48 小时，过期需重新网页授权。仅支持 Agent Plan / Coding Plan。
+enum AuthMethod: String, Codable, Sendable {
+    case aksk
+    case web
+
+    /// 宽松解码：旧数据/异常值一律回落 `.aksk`，绝不因陌生值解码失败而丢配置。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = (try? container.decode(String.self)) ?? ""
+        self = AuthMethod(rawValue: raw) ?? .aksk
+    }
+}
+
 // MARK: - 顶层：账号 → 服务
 //
 // 设计原则（见 PROJECT_RULES.md）：
@@ -47,6 +65,9 @@ struct Account: Identifiable, Equatable, Sendable {
     var fullID: String?       // 完整账号 ID（设置页展示全量）
     var alias: String?        // 用户自定义别名（覆盖 defaultName）
     var services: [Service]
+    var authMethod: AuthMethod = .aksk   // 凭证方式：AK/SK 或网页登录
+    /// 网页登录的 refresh token 已过期/被拒，需到设置里重新网页授权。AK/SK 账号恒为 false。
+    var webReauthNeeded: Bool = false
 
     /// 平台分组内的账号名。
     var accountDisplayName: String {
@@ -271,12 +292,21 @@ enum QuotaError: LocalizedError, Sendable {
     case commandFailed(String)
     case parseFailed(String)
     case emptyResult
+    /// 网页登录凭证失效（refresh token 48h 过期 / 被服务端拒绝），需重新网页授权。
+    case webReauthRequired(String)
 
     var errorDescription: String? {
         switch self {
         case .commandFailed(let m): return "命令执行失败：\(m)"
         case .parseFailed(let m): return "数据解析失败：\(m)"
         case .emptyResult: return "未返回任何数据"
+        case .webReauthRequired(let m): return "需要重新网页授权：\(m)"
         }
+    }
+
+    /// 是否为「需重新网页授权」（用于区分普通网络失败，避免误清旧值/误提示）。
+    var isWebReauthRequired: Bool {
+        if case .webReauthRequired = self { return true }
+        return false
     }
 }

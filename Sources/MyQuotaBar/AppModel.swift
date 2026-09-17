@@ -59,6 +59,10 @@ final class AppModel {
     @ObservationIgnored private var accountRevisions: [String: Int] = [:]
     /// 账号 ID -> 该账号完整账号 ID（STS 查得，用于命名尾号）。
     @ObservationIgnored private var accountFullID_: [String: String] = [:]
+    /// 网页登录账号的短期 STS 缓存（按账号 UUID，15 分钟自动续）。
+    @ObservationIgnored private let webCredentialCache = WebCredentialCache.shared
+    /// 网页登录凭证已过期 / 被拒、需重新授权的账号 ID（面板与设置据此提示）。
+    private(set) var webReauthNeeded: Set<String> = []
 
     /// 刷新源（按服务类型分类，用于独立配置刷新间隔）。
     enum RefreshSource: String, CaseIterable, Sendable {
@@ -188,6 +192,93 @@ final class AppModel {
         return config.id
     }
 
+    // MARK: 网页登录账号（免 AK/SK）
+
+    /// 网页登录成功后新增账号。refresh token 存钥匙串，默认开启两个套餐（该登录方式仅支持套餐）。
+    /// 同一火山账号已存在（无论 AK/SK 还是网页登录）则拒绝，避免重复。
+    @discardableResult
+    func addWebAccount(result: WebLoginResult, alias: String) throws -> String {
+        if let dup = accountConfigs.first(where: { $0.accountFullID == result.accountID }) {
+            let who = dup.alias.isEmpty ? "尾号 …\(String(result.accountID.suffix(4)))" : dup.alias
+            throw QuotaError.commandFailed("「\(who)」对应的账号已存在，不能重复添加")
+        }
+        let config = AccountConfig(
+            platform: .volcengine,
+            alias: alias.trimmingCharacters(in: .whitespacesAndNewlines),
+            accountFullID: result.accountID,
+            enableAgentPlan: true, enableCodingPlan: true, speechApps: [],
+            iamIdentity: result.iamIdentity,
+            authMethod: .web, webTokenExpiresAt: result.refreshTokenExpiresAt
+        )
+        try AccountStore.setRefreshToken(result.refreshToken, for: config.id)
+        let updated = accountConfigs + [config]
+        do {
+            try AccountStore.save(updated)
+        } catch {
+            try? Keychain.delete("rt_\(config.id)")
+            throw error
+        }
+        persistenceError = nil
+        configurationWarning = nil
+        accountConfigs = updated
+        accountRevisions[config.id] = 0
+        accountFullID_[config.id] = result.accountID
+        Task { [cache = webCredentialCache] in
+            await cache.prefill(accountID: config.id,
+                                credential: result.credential,
+                                expiresIn: result.stsExpiresIn)
+        }
+        refreshAccountConfig(config)
+        return config.id
+    }
+
+    /// 对已有网页账号重新授权：refresh token 覆盖为新值，账号 UUID/别名/开关全部不变。
+    /// 必须授权给同一个火山账号，绑错则拒绝且不破坏原配置。
+    func reauthorizeWeb(id: String, result: WebLoginResult) throws {
+        guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
+        if let existing = accountConfigs[idx].accountFullID, existing != result.accountID {
+            throw QuotaError.commandFailed(
+                "授权账号（…\(String(result.accountID.suffix(4)))）与原账号（…\(String(existing.suffix(4)))）不一致，请登录同一个账号")
+        }
+        try AccountStore.setRefreshToken(result.refreshToken, for: id)
+        accountConfigs[idx].webTokenExpiresAt = result.refreshTokenExpiresAt
+        accountConfigs[idx].authMethod = .web
+        accountConfigs[idx].accountFullID = result.accountID
+        if accountConfigs[idx].iamIdentity == nil {
+            accountConfigs[idx].iamIdentity = result.iamIdentity
+        }
+        persistConfigs()
+        accountFullID_[id] = result.accountID
+        webReauthNeeded.remove(id)
+        Task { [cache = webCredentialCache] in
+            await cache.invalidate(accountID: id)
+            await cache.prefill(accountID: id,
+                                credential: result.credential,
+                                expiresIn: result.stsExpiresIn)
+        }
+        reconfigureService(for: id)
+    }
+
+    /// 设置页套餐测试：不依赖输入框，直接用该账号当前凭证（AK/SK 或网页 STS）。
+    func testPlan(id: String, kind: PlanTestKind) async -> (ok: Bool, message: String) {
+        guard let config = accountConfigs.first(where: { $0.id == id }) else {
+            return (false, "账号不存在")
+        }
+        do {
+            let credential = try await resolveCredential(for: config)
+            switch kind {
+            case .agentPlan:
+                return await AgentPlanProvider(credential: credential).test()
+            case .codingPlan:
+                return await CodingPlanProvider(credential: credential).test()
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    enum PlanTestKind { case agentPlan, codingPlan }
+
     // MARK: 即时生效的账号编辑（设置页改了立即落盘 + 刷新，无需“保存”按钮）
 
     /// 持久化当前账号配置；失败时记录到 persistenceError（侧边栏顶部警告条展示）。
@@ -273,11 +364,13 @@ final class AppModel {
         bumpRevision(for: id)
         accounts.removeAll { $0.id == id }
         accountFullID_[id] = nil
+        webReauthNeeded.remove(id)
         collapsedAccounts.remove(id)
         collapsedServices = collapsedServices.filter { !$0.hasPrefix("\(id):") }
         persistenceError = nil
         configurationWarning = nil
         try AccountStore.deleteCredentials(for: id)
+        Task { [cache = webCredentialCache] in await cache.invalidate(accountID: id) }
     }
 
     func credentials(for id: String) -> (ak: String, sk: String) {
@@ -548,7 +641,7 @@ final class AppModel {
                     return (config, accountRevisions[config.id, default: 0])
                 case .codingPlan where config.isCodingPlanEnabled:
                     return (config, accountRevisions[config.id, default: 0])
-                case .speech where config.hasActiveSpeech:
+                case .speech where config.hasActiveSpeech && !config.isWebLogin:
                     return (config, accountRevisions[config.id, default: 0])
                 default:
                     return nil
@@ -655,17 +748,63 @@ final class AppModel {
         }
     }
 
-    private func fetchAgentPlan(for config: AccountConfig, revision: Int) async -> Bool {
-        guard config.platform == .volcengine else { return false }
+    /// 取某账号当前可用凭证：AK/SK 读钥匙串；网页登录用 refresh token 换/取短期 STS。
+    /// 网页 refresh token 本地已过期或缺失，直接抛 `.webReauthRequired`，不发网络请求。
+    private func resolveCredential(for config: AccountConfig) async throws -> VolcCredential {
+        if config.isWebLogin {
+            if config.isWebTokenExpired {
+                throw QuotaError.webReauthRequired("网页登录已超过 48 小时，请重新授权")
+            }
+            guard let refreshToken = AccountStore.refreshToken(for: config.id),
+                  !refreshToken.isEmpty else {
+                throw QuotaError.webReauthRequired("缺少网页登录凭证，请重新授权")
+            }
+            return try await webCredentialCache.credential(accountID: config.id,
+                                                            refreshToken: refreshToken)
+        }
         let ak = AccountStore.accessKeyID(for: config.id)
         let sk = AccountStore.secretAccessKey(for: config.id)
-        guard !ak.isEmpty, !sk.isEmpty else { return false }
-        await ensureAccountID(config, ak: ak, sk: sk, revision: revision)
-        guard isCurrent(accountID: config.id, revision: revision) else { return false }
-        let provider = AgentPlanProvider(accessKeyID: ak, secretAccessKey: sk)
+        guard !ak.isEmpty, !sk.isEmpty else {
+            throw QuotaError.commandFailed("未配置 AK/SK")
+        }
+        return VolcCredential(accessKeyID: ak, secretAccessKey: sk)
+    }
+
+    /// 取数失败时：网页登录失效 → 账号级重授标记 + 错误卡；其他错误走原有错误卡（保留旧值）。
+    private func handleFetchFailure(config: AccountConfig, kind: ErrorCardKind, error: Error) {
+        if let q = error as? QuotaError, q.isWebReauthRequired {
+            webReauthNeeded.insert(config.id)
+        }
+        let (serviceID, title): (String, String)
+        switch kind {
+        case .agentPlan: (serviceID, title) = ("agent-plan", "Agent Plan")
+        case .codingPlan: (serviceID, title) = ("coding-plan", "Coding Plan")
+        case .speech: (serviceID, title) = ("speech", "语音")
+        }
+        markServiceError(config: config, serviceID: serviceID,
+                         serviceTitle: title, kind: kind,
+                         message: error.localizedDescription)
+    }
+
+    private func fetchAgentPlan(for config: AccountConfig, revision: Int) async -> Bool {
+        guard config.platform == .volcengine else { return false }
+        let credential: VolcCredential
         do {
-            let plan = try await provider.fetch()
+            credential = try await resolveCredential(for: config)
+        } catch {
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            handleFetchFailure(config: config, kind: .agentPlan, error: error)
+            return false
+        }
+        if !config.isWebLogin {
+            await ensureAccountID(config, ak: credential.accessKeyID,
+                                  sk: credential.secretAccessKey, revision: revision)
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+        }
+        do {
+            let plan = try await AgentPlanProvider(credential: credential).fetch()
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            webReauthNeeded.remove(config.id)
             let service = Service(id: "agent-plan", title: "Agent Plan",
                                   content: .agentPlan(plan), status: .ok,
                                   errorMessage: nil, updatedAt: Date())
@@ -673,24 +812,30 @@ final class AppModel {
             return true
         } catch {
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
-            markServiceError(config: config, serviceID: "agent-plan",
-                             serviceTitle: "Agent Plan", kind: .agentPlan,
-                             message: error.localizedDescription)
+            handleFetchFailure(config: config, kind: .agentPlan, error: error)
             return false
         }
     }
 
     private func fetchCodingPlan(for config: AccountConfig, revision: Int) async -> Bool {
         guard config.platform == .volcengine else { return false }
-        let ak = AccountStore.accessKeyID(for: config.id)
-        let sk = AccountStore.secretAccessKey(for: config.id)
-        guard !ak.isEmpty, !sk.isEmpty else { return false }
-        await ensureAccountID(config, ak: ak, sk: sk, revision: revision)
-        guard isCurrent(accountID: config.id, revision: revision) else { return false }
-        let provider = CodingPlanProvider(accessKeyID: ak, secretAccessKey: sk)
+        let credential: VolcCredential
         do {
-            let plan = try await provider.fetch()
+            credential = try await resolveCredential(for: config)
+        } catch {
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            handleFetchFailure(config: config, kind: .codingPlan, error: error)
+            return false
+        }
+        if !config.isWebLogin {
+            await ensureAccountID(config, ak: credential.accessKeyID,
+                                  sk: credential.secretAccessKey, revision: revision)
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+        }
+        do {
+            let plan = try await CodingPlanProvider(credential: credential).fetch()
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            webReauthNeeded.remove(config.id)
             let service = Service(id: "coding-plan", title: "Coding Plan",
                                   content: .codingPlan(plan), status: .ok,
                                   errorMessage: nil, updatedAt: Date())
@@ -698,9 +843,7 @@ final class AppModel {
             return true
         } catch {
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
-            markServiceError(config: config, serviceID: "coding-plan",
-                             serviceTitle: "Coding Plan", kind: .codingPlan,
-                             message: error.localizedDescription)
+            handleFetchFailure(config: config, kind: .codingPlan, error: error)
             return false
         }
     }
@@ -781,7 +924,9 @@ final class AppModel {
         let full = accountFullID_[config.id]
         return Account(id: config.id, platform: config.platform.displayName, defaultName: "",
                        idTail: full.map { String($0.suffix(4)) }, fullID: full,
-                       alias: config.alias.isEmpty ? nil : config.alias, services: services)
+                       alias: config.alias.isEmpty ? nil : config.alias, services: services,
+                       authMethod: config.authMethod ?? .aksk,
+                       webReauthNeeded: webReauthNeeded.contains(config.id))
     }
 
     private func applyMeta(_ i: Int, config: AccountConfig) {
@@ -790,6 +935,8 @@ final class AppModel {
         accounts[i].fullID = full
         accounts[i].idTail = full.map { String($0.suffix(4)) }
         accounts[i].alias = config.alias.isEmpty ? nil : config.alias
+        accounts[i].authMethod = config.authMethod ?? .aksk
+        accounts[i].webReauthNeeded = webReauthNeeded.contains(config.id)
     }
 
     /// 插入/更新单个服务（Agent Plan）。

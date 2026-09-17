@@ -6,6 +6,7 @@ struct AccountSectionView: View {
     let account: Account
     @Bindable var model: AppModel
     @State private var hovered = false
+    @State private var showReauth = false
 
     private var isCollapsed: Bool { model.collapsedAccounts.contains(account.id) }
     /// chevron：折叠时常显（保证能发现可展开）；展开时仅 hover 显示。
@@ -39,6 +40,14 @@ struct AccountSectionView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if account.authMethod == .web {
+                Text("网页登录")
+                    .font(.system(size: 9, weight: .medium))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    .foregroundStyle(.secondary)
+                    .help("网页登录账号（免 AK/SK，每 48 小时需重新授权一次）")
+            }
             if isCollapsed, let tier = collapsedTier {
                 Text(tier)
                     .font(.system(size: 10, weight: .medium))
@@ -53,9 +62,24 @@ struct AccountSectionView: View {
                     .help("该账号有服务刷新失败，展开查看详情")
             }
             Spacer()
+            if account.webReauthNeeded {
+                Button {
+                    showReauth = true
+                } label: {
+                    Label("重新授权", systemImage: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .foregroundStyle(.orange)
+                .help("网页登录已过期，点击重新授权")
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture { model.toggleAccountCollapsed(account.id) }
+        .sheet(isPresented: $showReauth) {
+            WebReauthorizeSheet(model: model, accountID: account.id)
+        }
         .onHover { hovered = $0 }
         .help(isCollapsed ? "点击展开账号" : "点击折叠账号")
         // chevron 浮在左侧边距里，不占排版空间：账号名始终在最左。

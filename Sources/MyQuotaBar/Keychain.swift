@@ -180,12 +180,17 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
     var enableCodingPlan: Bool?
     var speechApps: [SpeechApp] // 语音应用列表（0..10）
     var iamIdentity: String?    // 身份标记："root"（主账号）/ "user:<名>"（子用户）；测试连接后写入
+    /// 凭证方式。后加字段用可选承载：旧配置缺失键解为 nil，等同 `.aksk`，无需迁移。
+    var authMethod: AuthMethod?
+    /// 网页登录 refresh token 的硬过期时间（签发后 48 小时）。仅网页登录账号有值，用于提前提示重授。
+    var webTokenExpiresAt: Date?
 
     init(id: String = UUID().uuidString, platform: Platform = .volcengine,
          alias: String = "", accountFullID: String? = nil,
          enableAgentPlan: Bool = false, enableCodingPlan: Bool? = nil,
          speechApps: [SpeechApp] = [],
-         iamIdentity: String? = nil) {
+         iamIdentity: String? = nil,
+         authMethod: AuthMethod? = nil, webTokenExpiresAt: Date? = nil) {
         self.id = id
         self.platform = platform
         self.alias = alias
@@ -194,6 +199,17 @@ struct AccountConfig: Codable, Identifiable, Equatable, Sendable {
         self.enableCodingPlan = enableCodingPlan
         self.speechApps = speechApps
         self.iamIdentity = iamIdentity
+        self.authMethod = authMethod
+        self.webTokenExpiresAt = webTokenExpiresAt
+    }
+
+    /// 是否网页登录（免 AK/SK）账号。旧配置无此字段 = false。
+    var isWebLogin: Bool { authMethod == .web }
+
+    /// 网页登录 refresh token 是否已硬过期（过期须重新授权；nil 表示非网页账号）。
+    var isWebTokenExpired: Bool {
+        guard let exp = webTokenExpiresAt else { return false }
+        return Date() >= exp
     }
 
     /// Coding Plan 开关的非可选视图（nil = 旧配置，等同关闭）。
@@ -266,6 +282,12 @@ enum AccountStore {
     // AK/SK 存钥匙串，键按账号 ID 区分。
     static func accessKeyID(for id: String) -> String { Keychain.get("ak_\(id)") ?? "" }
     static func secretAccessKey(for id: String) -> String { Keychain.get("sk_\(id)") ?? "" }
+
+    // 网页登录的 OAuth refresh token（敏感）同样按账号 ID 存钥匙串；STS 只在内存短期缓存、不落盘。
+    static func refreshToken(for id: String) -> String? { Keychain.get("rt_\(id)") }
+    static func setRefreshToken(_ token: String, for id: String) throws {
+        try Keychain.set(token, for: "rt_\(id)")
+    }
     static func setCredentials(ak: String, sk: String, for id: String) throws {
         let akKey = "ak_\(id)"
         let skKey = "sk_\(id)"
@@ -284,5 +306,6 @@ enum AccountStore {
     static func deleteCredentials(for id: String) throws {
         try Keychain.delete("ak_\(id)")
         try Keychain.delete("sk_\(id)")
+        try? Keychain.delete("rt_\(id)")
     }
 }

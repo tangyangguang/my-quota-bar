@@ -1,6 +1,22 @@
 import Foundation
 import CryptoKit
 
+/// 调用火山 OpenAPI 用的凭证。
+/// - AK/SK 账号：只有长效 ak/sk，`sessionToken` 为 nil。
+/// - 网页登录账号：ak/sk 是 OAuth 兑换的 15 分钟临时三元组，`sessionToken` 非空，
+///   签名时必须把 `X-Security-Token` 一并纳入签名头（火山签名规范）。
+struct VolcCredential: Sendable, Equatable {
+    let accessKeyID: String
+    let secretAccessKey: String
+    let sessionToken: String?
+
+    init(accessKeyID: String, secretAccessKey: String, sessionToken: String? = nil) {
+        self.accessKeyID = accessKeyID
+        self.secretAccessKey = secretAccessKey
+        self.sessionToken = sessionToken
+    }
+}
+
 /// 火山引擎 OpenAPI 签名器（HMAC-SHA256，AWS V4 风格）。
 /// 语音服务、Agent Plan、STS 身份查询都复用它——只是 host / region / service 不同。
 struct VolcSigner: Sendable {
@@ -9,6 +25,26 @@ struct VolcSigner: Sendable {
     let host: String
     let region: String
     let service: String
+    /// 临时凭证（网页登录 STS）时携带；参与签名并以 X-Security-Token 头发送。
+    let securityToken: String?
+
+    init(accessKeyID: String, secretAccessKey: String,
+         host: String, region: String, service: String, securityToken: String? = nil) {
+        self.accessKeyID = accessKeyID
+        self.secretAccessKey = secretAccessKey
+        self.host = host
+        self.region = region
+        self.service = service
+        self.securityToken = securityToken
+    }
+
+    /// 用一组凭证构造（AK/SK 或网页登录 STS）。
+    init(credential: VolcCredential, host: String, region: String, service: String) {
+        self.init(accessKeyID: credential.accessKeyID,
+                  secretAccessKey: credential.secretAccessKey,
+                  host: host, region: region, service: service,
+                  securityToken: credential.sessionToken)
+    }
 
     /// 生成一个已签名的请求。
     /// - method: "GET" / "POST"
@@ -23,12 +59,17 @@ struct VolcSigner: Sendable {
         let datestamp = String(xdate.prefix(8))
 
         let payloadHash = sha256hex(body)
-        let signedHeaders = "content-type;host;x-content-sha256;x-date"
-        let canonicalHeaders =
+        // 临时 STS：x-security-token 必须参与签名（头名按小写、字典序位于 x-date 前）。
+        var signedHeaders = "content-type;host;x-content-sha256;x-date"
+        var canonicalHeaders =
             "content-type:application/json\n" +
             "host:\(host)\n" +
             "x-content-sha256:\(payloadHash)\n" +
             "x-date:\(xdate)\n"
+        if let token = securityToken, !token.isEmpty {
+            signedHeaders = "content-type;host;x-content-sha256;x-date;x-security-token"
+            canonicalHeaders += "x-security-token:\(token)\n"
+        }
         let canonicalRequest = [
             method, "/", query, canonicalHeaders, signedHeaders, payloadHash
         ].joined(separator: "\n")
@@ -55,6 +96,9 @@ struct VolcSigner: Sendable {
         req.setValue(xdate, forHTTPHeaderField: "X-Date")
         req.setValue(payloadHash, forHTTPHeaderField: "X-Content-Sha256")
         req.setValue(authorization, forHTTPHeaderField: "Authorization")
+        if let token = securityToken, !token.isEmpty {
+            req.setValue(token, forHTTPHeaderField: "X-Security-Token")
+        }
         req.timeoutInterval = timeout
         return req
     }

@@ -18,7 +18,8 @@
 
 **当前版本：1.1.0（build 2）稳定；设置交互重构见 `CHANGELOG.md` 未发布。** 核心能力：
 - ✅ **多平台架构**：开放 `Platform` 标识 + `PlatformAdapter` 注册表（目前仅 `volcengine`）；未知平台原样保留，加新平台不破坏旧 schema。
-- ✅ **任意多账号**：每个账号一对 AK/SK，配置任意数量，可拖动排序。
+- ✅ **任意多账号**：账号支持两种登录方式——传统 **AK/SK** 与 **网页登录（免 AK/SK、无需实名认证）**；同一火山账号 ID 全局去重（不论登录方式），可任意混用、配置任意数量、可拖动排序。
+- ✅ **网页登录**：火山官方公开 OAuth（same-device loopback + PKCE，原生 Network.framework 本地回调，零捆绑工具）；仅支持 Agent Plan / Coding Plan；refresh_token 48h 硬过期需重新授权，语音服务不支持。详见下文「火山网页登录」。
 - ✅ **火山 Agent Plan**：AK/SK 直调 OpenAPI `GetAFPUsage`（**已彻底移除 arkcli 依赖**）。
 - ✅ **火山 Coding Plan**：AK/SK 直调 OpenAPI `GetCodingPlanUsage`；与 Agent Plan 同一账号可同时订阅、各自独立开关，展示逻辑与 Agent Plan 共用一套卡片。
 - ✅ **火山语音服务**：每账号可配 1–10 个语音应用，各自独立 AppID + 备注 + 额度；**每个应用内 ASR / TTS 可分别独立开关**。
@@ -68,8 +69,8 @@
 | 语言 / UI | Swift 6 + SwiftUI `MenuBarExtra`（`.menuBarExtraStyle(.window)`） |
 | 构建 | SPM + `build-app.sh`，universal（arm64 + x86_64），本地自签名证书签名（证书名 `My Quota Bar Signing`，脚本首次运行自动生成并导入登录钥匙串，无需 Apple Developer 账号）。**不可退回 ad-hoc（`--sign -`）**：ad-hoc 身份随每次编译变化，钥匙串 AK/SK 会反复弹授权（每账号 2 次） |
 | 分发 | 直接发 `outputs/My Quota Bar.app`。自签证书未公证，对方首次打开需 `xattr -cr "路径"` 清除 quarantine（README 有说明）。**零 CLI 依赖，朋友只需填 AK/SK。** |
-| 认证 | 账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift` |
-| 凭证存储 | AK/SK 加密存 macOS 钥匙串（按账号 UUID 隔离）；非敏感配置存 UserDefaults(JSON) |
+| 认证 | 两种：①账号级 AK/SK，火山签名 HMAC-SHA256（AWS V4 风格），见 `VolcSigner.swift`；②网页登录 OAuth 换 15 分钟临时 STS（`VolcWebAuth.swift`），签名时带 `X-Security-Token` 头并纳入签名 |
+| 凭证存储 | AK/SK 与网页 refresh_token 均加密存 macOS 钥匙串（按账号 UUID 隔离，键 `ak_/sk_/rt_<id>`）；临时 STS 只在内存缓存（`WebCredentialCache`，15 分钟、提前 90 秒续、并发去重）不落盘；非敏感配置存 UserDefaults(JSON) |
 | 定时刷新 | 全 App 单一非重复调度 Timer；按源计算 nextAttempt；最多 4 个账号并发；失败指数退避；分项失败保留旧值；休眠/断网感知；Timer tolerance 降耗 |
 | 刷新间隔 | 默认 3 分钟（180s），可在「通用」设置里调（UI 一个间隔，内部按源调度）。上游有 5–30 分钟延迟 |
 | 开机启动 | `SMAppService.mainApp`，通用页开关；纯系统能力，不进配置 schema |
@@ -110,13 +111,22 @@
 - **用途**：测试连接时拿账号 ID + 真实名称（IAM 用户名；若是默认 `user` 占位则回落账号 ID）自动填账户名称。
 - 实现：`VolcSigner.fetchIdentity(...)` / `fetchAccountID(...)`
 
+### 火山网页登录 —— 官方公开 OAuth（免 AK/SK、未实名可用，已实测）
+- **授权端点**：`https://signin.volcengine.com/authorize/oauth/authorize`；**token 端点**：`.../authorize/oauth/token`。
+- **固定参数**：公共客户端 `client_id = trn:signin:::devtools/same-device`（火山官方 devtools 客户端，公开、无 secret）；`scope = Console:All:All`；`response_type=code`；PKCE `S256`。
+- **流程（same-device loopback）**：App 在 `127.0.0.1` 随机端口起一次性 HTTP 服务（原生 Network.framework，路径 `/oauth/callback`），浏览器授权后跳回 `http://127.0.0.1:<port>/oauth/callback?code=&state=`，校验 `state` 后用 `code + code_verifier` 换 token。账号密码只在火山官方域名页面输入，App 不接触。
+- **token 响应**：`access_token` 是「JSON 字符串」，内含临时 STS 三元组 `access_key_id` / `secret_access_key` / `session_token`；另有 `refresh_token`（JWT，含 `exp`）、`id_token`（JWT，含 `sub`=账号ID、`trn`=身份）、`expires_in`=900。
+- **续期硬约束（实测）**：`refresh_token` 自签发起 **48 小时硬过期**；用 `grant_type=refresh_token` 换新 STS 时，响应**不回传新的 refresh_token**（不轮换、不滑动续期）。因此 `TokenResponse.refresh_token` 必须是可选字段，否则刷新响应整体解码失败。STS 到期前用旧 refresh_token 续即可；48h 后服务端返 `invalid_grant/invalid_token/expired_token`，转为「需重新授权」。
+- **取数**：STS 与 AK/SK 走**同一个** OpenAPI 网关（`ark.cn-beijing.volcengineapi.com`，`GetAFPUsage` / `GetCodingPlanUsage`），签名时把 `X-Security-Token: <session_token>` 纳入 V4 签名头。未实名账号实测可查这两个套餐；语音等其他服务不支持网页登录。
+- 实现：`VolcWebAuth.swift`（PKCE/URL/JWT 解析/loopback 接收器）、`WebCredentialCache`（STS 内存缓存）、`VolcCredential`（统一 AK/SK 与 STS）。
+
 ## 数据模型（核心）
 
 - **`Platform`**（开放标识 struct，Codable）：当前 `volcengine`。未知平台原样保留，`PlatformRegistry` 只公布当前可新建的平台。
 - **`PlatformAdapter`**（Platforms/）：声明平台凭证字段、身份测试和服务目录；当前实现 `VolcenginePlatformAdapter`。
-- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `enableCodingPlan: Bool?`（后加字段，缺失键解为 nil=关，读取走 `isCodingPlanEnabled`，旧配置免迁移）/ `speechApps[]` / `iamIdentity?`（身份标记 "root" / "user:<名>"，测试连接后写入，`identityBadge` 显示为「主账号 / 子用户 · 名」）。合成 Codable；AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`。**没有独立语音总开关**：`hasActiveSpeech` 派生自 speechApps，`hasAnyService = enableAgentPlan || hasActiveSpeech`。
+- **`AccountConfig`**（Keychain.swift）：`id(UUID)` / `platform` / `alias` / `accountFullID?` / `enableAgentPlan` / `enableCodingPlan: Bool?`（后加字段，缺失键解为 nil=关，读取走 `isCodingPlanEnabled`，旧配置免迁移）/ `speechApps[]` / `iamIdentity?`（身份标记 "root" / "user:<名>"，测试连接后写入，`identityBadge` 显示为「主账号 / 子用户 · 名」）/ `authMethod: AuthMethod?`（`.aksk` / `.web`，缺失或未知原始值一律解为 `.aksk`；派生属性 `isWebLogin`）/ `webTokenExpiresAt: Date?`（网页 refresh_token 的 48h 过期时刻，派生属性 `isWebTokenExpired`）。合成 Codable；AK/SK 存钥匙串 `ak_<id>` / `sk_<id>`，网页 refresh_token 存 `rt_<id>`。**没有独立语音总开关**：`hasActiveSpeech` 派生自 speechApps，`hasAnyService = enableAgentPlan || isCodingPlanEnabled || hasActiveSpeech`。**网页登录账号不调度语音**（AppModel 按 `isWebLogin` 排除，即便残留 speechApps 也不拉）。
 - **`SpeechApp`**：`id(UUID)` / `appID` / `label` / `enableASR` / `enableTTS`（合成 Codable）。`isActive` = AppID 为有效数字且 ASR/TTS 至少开一个；全不勾或 AppID 无效则不拉数、不出卡（配置仍保留）。`displayLabel` = label 有值用 label，否则"应用 <AppID>"。取数时只请求开启的子服务，关掉的不出卡、不报错。
-- **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串。
+- **`AccountStore`**（Keychain.swift）：`load()`/`save()` JSON↔UserDefaults；`accessKeyID(for:)`/`secretAccessKey(for:)`/`setCredentials(...)`/`deleteCredentials(...)` 走钥匙串；网页登录另有 `refreshToken(for:)` / `setRefreshToken(_:for:)`（键 `rt_<id>`），删除账号时随 `deleteCredentials` 一并清理。
 - **面板侧**：`Account` / `Service` / `ServiceContent`(枚举: `.agentPlan` / `.codingPlan` / `.speech`)（QuotaModels.swift）。Agent Plan 与 Coding Plan 的行视图共用 `PlanCardView`（入参 `PlanPeriodDisplay`，仅底部明细不同：AFP 绝对值 vs `已用 X%`）。
 
 ## 项目结构
