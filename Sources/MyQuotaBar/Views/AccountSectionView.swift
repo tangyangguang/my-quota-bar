@@ -125,9 +125,14 @@ struct AccountSectionView: View {
         if webBadgeExpired { return "网页登录 · 需重新授权" }
         guard let exp = account.webTokenExpiresAt else { return "网页登录" }
         let remain = exp.timeIntervalSinceNow
-        if remain >= 3600 {
+        if remain >= 10 * 3600 {
+            // 10 小时及以上显示整数，避免小数位干扰。
             return "网页登录 · 剩 \(Int(remain / 3600)) 小时"
+        } else if remain >= 3600 {
+            // 10 小时以内显示一位小数（如 9.3 小时），临期更精确。
+            return String(format: "网页登录 · 剩 %.1f 小时", remain / 3600)
         } else if remain >= 60 {
+            // 不足 1 小时直接整数分钟。
             return "网页登录 · 剩 \(Int(remain / 60)) 分钟"
         }
         return "网页登录 · 即将过期"
