@@ -926,6 +926,7 @@ final class AppModel {
                        idTail: full.map { String($0.suffix(4)) }, fullID: full,
                        alias: config.alias.isEmpty ? nil : config.alias, services: services,
                        authMethod: config.authMethod ?? .aksk,
+                       webTokenExpiresAt: config.webTokenExpiresAt,
                        webReauthNeeded: webReauthNeeded.contains(config.id))
     }
 
@@ -936,6 +937,7 @@ final class AppModel {
         accounts[i].idTail = full.map { String($0.suffix(4)) }
         accounts[i].alias = config.alias.isEmpty ? nil : config.alias
         accounts[i].authMethod = config.authMethod ?? .aksk
+        accounts[i].webTokenExpiresAt = config.webTokenExpiresAt
         accounts[i].webReauthNeeded = webReauthNeeded.contains(config.id)
     }
 

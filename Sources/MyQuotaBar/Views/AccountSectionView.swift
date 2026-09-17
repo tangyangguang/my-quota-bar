@@ -41,19 +41,15 @@ struct AccountSectionView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             if account.authMethod == .web {
-                Text("网页登录")
+                Text(webBadgeText)
                     .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                    .foregroundStyle(.secondary)
-                    .help("网页登录账号（免 AK/SK，每 48 小时需重新授权一次）")
-            }
-            if isCollapsed, let tier = collapsedTier {
-                Text(tier)
-                    .font(.system(size: 10, weight: .medium))
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(webBadgeExpired ? Color.orange : Color.secondary)
+                    .help(webBadgeExpired
+                          ? "网页登录已过期，点击右侧重新授权"
+                          : "网页登录账号（免 AK/SK），refresh token 48 小时有效，到期需重新授权一次")
             }
             if isCollapsed && hasError {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -119,13 +115,22 @@ struct AccountSectionView: View {
         .opacity(hasError ? 0.7 : 1)
     }
 
-    private var collapsedTier: String? {
-        for service in account.services {
-            if case .agentPlan(let plan) = service.content, !plan.tier.isEmpty {
-                return plan.tier
-            }
+    /// 账号层只标识登录方式与有效期，不显示任何套餐档位（tier 属于 Agent Plan 服务卡）。
+    private var webBadgeExpired: Bool {
+        account.webReauthNeeded ||
+        (account.webTokenExpiresAt.map { $0.timeIntervalSinceNow <= 0 } ?? false)
+    }
+
+    private var webBadgeText: String {
+        if webBadgeExpired { return "网页登录 · 需重新授权" }
+        guard let exp = account.webTokenExpiresAt else { return "网页登录" }
+        let remain = exp.timeIntervalSinceNow
+        if remain >= 3600 {
+            return "网页登录 · 剩 \(Int(remain / 3600)) 小时"
+        } else if remain >= 60 {
+            return "网页登录 · 剩 \(Int(remain / 60)) 分钟"
         }
-        return nil
+        return "网页登录 · 即将过期"
     }
 }
 

@@ -66,6 +66,8 @@ struct Account: Identifiable, Equatable, Sendable {
     var alias: String?        // 用户自定义别名（覆盖 defaultName）
     var services: [Service]
     var authMethod: AuthMethod = .aksk   // 凭证方式：AK/SK 或网页登录
+    /// 网页登录 refresh token 的硬过期时刻（48h）。仅网页账号有值，用于标题行显示剩余有效期。
+    var webTokenExpiresAt: Date?
     /// 网页登录的 refresh token 已过期/被拒，需到设置里重新网页授权。AK/SK 账号恒为 false。
     var webReauthNeeded: Bool = false
 
