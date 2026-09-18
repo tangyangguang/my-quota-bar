@@ -129,14 +129,14 @@ struct AccountsTab: View {
                 Spacer()
                 if model.accountConfigs.count > 1 {
                     Button { moveSelectedAccount(offset: -1) } label: {
-                        Image(systemName: "chevron.up").frame(width: 24, height: 22)
+                        Image(systemName: "arrow.up").frame(width: 24, height: 22)
                     }
                     .buttonStyle(.borderless)
                     .disabled(!canMoveSelected(offset: -1))
                     .help("上移选中账号")
 
                     Button { moveSelectedAccount(offset: 1) } label: {
-                        Image(systemName: "chevron.down").frame(width: 24, height: 22)
+                        Image(systemName: "arrow.down").frame(width: 24, height: 22)
                     }
                     .buttonStyle(.borderless)
                     .disabled(!canMoveSelected(offset: 1))
