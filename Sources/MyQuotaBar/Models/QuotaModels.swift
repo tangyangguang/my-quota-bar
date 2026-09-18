@@ -124,6 +124,21 @@ struct AgentPlan: Equatable, Sendable {
     var userName: String?     // 账号名（viewer.user_name）
     var accountID: String?    // 账号 ID（viewer.account_id）
     var periods: [AgentPlanPeriod]
+    /// 套餐订阅到期时刻（ListSubscribeTrade 的 EndTime）。
+    /// 附加信息：查不到就是 nil（不展示），绝不影响额度主数据。
+    var expiresAt: Date?
+
+    init(tier: String, edition: String, unit: String,
+         userName: String? = nil, accountID: String? = nil,
+         periods: [AgentPlanPeriod], expiresAt: Date? = nil) {
+        self.tier = tier
+        self.edition = edition
+        self.unit = unit
+        self.userName = userName
+        self.accountID = accountID
+        self.periods = periods
+        self.expiresAt = expiresAt
+    }
 }
 
 struct AgentPlanPeriod: Identifiable, Equatable, Sendable {
@@ -169,6 +184,15 @@ struct AgentPlanPeriod: Identifiable, Equatable, Sendable {
 struct CodingPlan: Equatable, Sendable {
     var status: String                 // 官方 Status，如 "Running" / "Reclaimed"
     var periods: [CodingPlanPeriod]
+    /// 套餐订阅到期时刻（ListSubscribeTrade 的 EndTime）。
+    /// 附加信息：查不到就是 nil（不展示），绝不影响额度主数据。
+    var expiresAt: Date?
+
+    init(status: String, periods: [CodingPlanPeriod], expiresAt: Date? = nil) {
+        self.status = status
+        self.periods = periods
+        self.expiresAt = expiresAt
+    }
 }
 
 struct CodingPlanPeriod: Identifiable, Equatable, Sendable {
@@ -238,6 +262,53 @@ struct SpeechPack: Identifiable, Equatable, Sendable {
     var usedPercent: Double {
         guard purchasedValue > 0 else { return 0 }
         return max(0, min(100, usedValue / purchasedValue * 100))
+    }
+}
+
+// MARK: - 套餐订阅到期（附加信息）
+
+/// 套餐「订阅到期」展示口径。与「额度窗口重置时间」是完全不同的概念：
+/// 重置时间是每周/每月循环回血；到期时间是套餐彻底结束、之后不再有额度。
+/// 因此它只展示在服务标题行，不与窗口重置倒计时混在一起。
+enum PlanExpiry {
+    /// 标题行文案。
+    /// - 未过期：「到期 11/15 · 剩 58 天」
+    /// - 已过期：「已过期」
+    enum State: Equatable, Sendable {
+        case active(daysLeft: Int)
+        case expired
+    }
+
+    /// 按自然日差计算剩余天数：到期日 - 今天，只看日历日期、不看时刻。
+    /// 例：今天 9/18，到期 11/15 → 9/19..9/30 (12) + 10 月 (31) + 11/1..11/15 (15) = 58 天。
+    /// 到期当天返回 0（今天最后一天，仍算未过期）。
+    static func daysLeft(until expiry: Date, now: Date = Date(), calendar: Calendar = .current) -> Int {
+        let from = calendar.startOfDay(for: now)
+        let to = calendar.startOfDay(for: expiry)
+        return calendar.dateComponents([.day], from: from, to: to).day ?? 0
+    }
+
+    /// 判定状态：到期时刻本身已过即视为过期。
+    static func state(expiry: Date, now: Date = Date(), calendar: Calendar = .current) -> State {
+        let days = daysLeft(until: expiry, now: now, calendar: calendar)
+        return days < 0 ? .expired : .active(daysLeft: days)
+    }
+
+    /// 到期日期文案，只到「月/日」（与项目其它日期展示口径一致）。
+    static func dateText(_ expiry: Date, calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.month, .day], from: expiry)
+        return "\(c.month ?? 0)/\(c.day ?? 0)"
+    }
+
+    /// 标题行完整文案。
+    static func titleText(expiry: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        switch state(expiry: expiry, now: now, calendar: calendar) {
+        case .expired:
+            return "已过期"
+        case .active(let days):
+            let date = dateText(expiry, calendar: calendar)
+            return days == 0 ? "到期 \(date) · 今天" : "到期 \(date) · 剩 \(days) 天"
+        }
     }
 }
 

@@ -804,9 +804,14 @@ final class AppModel {
         do {
             let plan = try await AgentPlanProvider(credential: credential).fetch()
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            // 到期时间是附加信息：单独取、失败不致命（拿不到就只不展示，不影响额度）。
+            let expiry = await fetchPlanExpiry(credential: credential, kind: .agentPlan)
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            var planWithExpiry = plan
+            planWithExpiry.expiresAt = expiry
             webReauthNeeded.remove(config.id)
             let service = Service(id: "agent-plan", title: "Agent Plan",
-                                  content: .agentPlan(plan), status: .ok,
+                                  content: .agentPlan(planWithExpiry), status: .ok,
                                   errorMessage: nil, updatedAt: Date())
             upsertService(config: config, service: service)
             return true
@@ -835,9 +840,14 @@ final class AppModel {
         do {
             let plan = try await CodingPlanProvider(credential: credential).fetch()
             guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            // 到期时间是附加信息：单独取、失败不致命（拿不到就只不展示，不影响额度）。
+            let expiry = await fetchPlanExpiry(credential: credential, kind: .codingPlan)
+            guard isCurrent(accountID: config.id, revision: revision) else { return false }
+            var planWithExpiry = plan
+            planWithExpiry.expiresAt = expiry
             webReauthNeeded.remove(config.id)
             let service = Service(id: "coding-plan", title: "Coding Plan",
-                                  content: .codingPlan(plan), status: .ok,
+                                  content: .codingPlan(planWithExpiry), status: .ok,
                                   errorMessage: nil, updatedAt: Date())
             upsertService(config: config, service: service)
             return true
@@ -846,6 +856,13 @@ final class AppModel {
             handleFetchFailure(config: config, kind: .codingPlan, error: error)
             return false
         }
+    }
+
+    /// 取套餐订阅到期时间。失败/未订阅一律返回 nil，绝不向上抛——
+    /// 到期只是附加信息，不能因为它取不到就让整个额度卡片报错。
+    private func fetchPlanExpiry(credential: VolcCredential,
+                                 kind: PlanExpiryProvider.Kind) async -> Date? {
+        try? await PlanExpiryProvider(credential: credential).fetchExpiry(kind: kind)
     }
 
     private func fetchSpeech(for config: AccountConfig, revision: Int) async -> Bool {

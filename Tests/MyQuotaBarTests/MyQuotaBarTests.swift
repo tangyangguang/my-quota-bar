@@ -616,4 +616,105 @@ final class MyQuotaBarTests: XCTestCase {
         XCTAssertTrue(QuotaError.webReauthRequired("x").isWebReauthRequired)
         XCTAssertFalse(QuotaError.commandFailed("x").isWebReauthRequired)
     }
+
+    // MARK: - 套餐订阅到期（辅助信息）
+
+    /// 用固定 UTC 日历，避免测试依赖跑测试机器的本地时区。
+    private var utc: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }
+
+    private func date(_ s: String) -> Date {
+        PlanExpiryProvider.parseTime(s)!
+    }
+
+    /// EndTime 是 UTC 真实时刻，必须按时刻解析；不能直接截字符串（UTC 16:00 后会跨到次日）。
+    func testParseOfficialEndTime() {
+        XCTAssertEqual(date("2026-11-15T15:59:59Z").timeIntervalSince1970,
+                       1794758399, accuracy: 1)
+        // 带毫秒 / 带偏移的变体也应能解析。
+        XCTAssertNotNil(PlanExpiryProvider.parseTime("2026-11-15T15:59:59.000Z"))
+        XCTAssertNotNil(PlanExpiryProvider.parseTime("2026-11-16T00:00:00+08:00"))
+        XCTAssertNil(PlanExpiryProvider.parseTime("not-a-date"))
+    }
+
+    /// 剩余天数按自然日差算，跨含 31 日的月份要按实际日历算。
+    /// 9/18 → 11/15：9/19..9/30(12) + 10 月(31) + 11/1..11/15(15) = 58。
+    func testDaysLeftCrossesLongMonth() {
+        XCTAssertEqual(PlanExpiry.daysLeft(until: date("2026-11-15T15:59:59Z"),
+                                           now: date("2026-09-18T05:00:00Z"),
+                                           calendar: utc), 58)
+        // 10 月整月 = 31 天（不是 30）。
+        XCTAssertEqual(PlanExpiry.daysLeft(until: date("2026-11-01T00:00:00Z"),
+                                           now: date("2026-10-01T00:00:00Z"),
+                                           calendar: utc), 31)
+        // 2 月（非闰年）= 28 天。
+        XCTAssertEqual(PlanExpiry.daysLeft(until: date("2027-03-01T00:00:00Z"),
+                                           now: date("2027-02-01T00:00:00Z"),
+                                           calendar: utc), 28)
+    }
+
+    /// 到期当天算未过期（剩 0 天），跨过当天才算过期。
+    func testExpiryStateBoundary() {
+        let expiry = date("2026-11-15T15:59:59Z")
+        XCTAssertEqual(PlanExpiry.state(expiry: expiry, now: date("2026-11-15T01:00:00Z"),
+                                        calendar: utc), .active(daysLeft: 0))
+        XCTAssertEqual(PlanExpiry.state(expiry: expiry, now: date("2026-11-14T01:00:00Z"),
+                                        calendar: utc), .active(daysLeft: 1))
+        XCTAssertEqual(PlanExpiry.state(expiry: expiry, now: date("2026-11-16T01:00:00Z"),
+                                        calendar: utc), .expired)
+    }
+
+    /// 标题行文案：日期取月/日，过期只显示「已过期」。
+    func testExpiryTitleText() {
+        let expiry = date("2026-11-15T15:59:59Z")
+        XCTAssertEqual(PlanExpiry.titleText(expiry: expiry, now: date("2026-09-18T05:00:00Z"),
+                                            calendar: utc), "到期 11/15 · 剩 58 天")
+        XCTAssertEqual(PlanExpiry.titleText(expiry: expiry, now: date("2026-11-15T01:00:00Z"),
+                                            calendar: utc), "到期 11/15 · 今天")
+        XCTAssertEqual(PlanExpiry.titleText(expiry: expiry, now: date("2026-12-01T01:00:00Z"),
+                                            calendar: utc), "已过期")
+        // 单位数月/日不补零。
+        XCTAssertEqual(PlanExpiry.dateText(date("2027-03-01T00:00:00Z"), calendar: utc), "3/1")
+    }
+
+    /// 未订阅（InfoList 为空）必须返回 nil（不展示），不是报错。
+    func testParseExpiryEmptyListReturnsNil() throws {
+        let json = #"{"ResponseMetadata":{"RequestId":"x"},"Result":{"InfoList":[]}}"#
+        XCTAssertNil(try PlanExpiryProvider.parseExpiry(Data(json.utf8)))
+        // Result 缺失同样按「拿不到」处理。
+        let json2 = #"{"ResponseMetadata":{"RequestId":"x"}}"#
+        XCTAssertNil(try PlanExpiryProvider.parseExpiry(Data(json2.utf8)))
+    }
+
+    /// 真实响应形状：取到 EndTime；多条记录（连续续费）取最晚的那条。
+    func testParseExpiryRealShape() throws {
+        let json = #"{"ResponseMetadata":{"Action":"ListSubscribeTrade"},"Result":{"InfoList":[{"ResourceType":"CodingPlan","BizInfo":"pro","Status":"Running","InstanceID":"Ark_bd2","StartTime":"2026-09-15T03:40:41Z","EndTime":"2026-11-15T15:59:59Z","EnableAutoRenew":false,"Period":"monthly"}]}}"#
+        let d = try PlanExpiryProvider.parseExpiry(Data(json.utf8))
+        XCTAssertEqual(d, date("2026-11-15T15:59:59Z"))
+
+        let multi = #"{"Result":{"InfoList":[{"EndTime":"2026-11-15T15:59:59Z"},{"EndTime":"2026-12-16T15:59:59Z"}]}}"#
+        XCTAssertEqual(try PlanExpiryProvider.parseExpiry(Data(multi.utf8)),
+                       date("2026-12-16T15:59:59Z"))
+    }
+
+    /// 接口层错误要能上抛（便于诊断）；由 AppModel 决定不致命。
+    func testParseExpiryErrorResponse() {
+        let json = #"{"ResponseMetadata":{"Error":{"Code":"AccessDenied","Message":"无权限"}}}"#
+        XCTAssertThrowsError(try PlanExpiryProvider.parseExpiry(Data(json.utf8)))
+    }
+
+    /// 到期字段不得影响额度主数据：AgentPlan / CodingPlan 附加后可正常构造。
+    func testPlanExpiryIsAdditive() {
+        let agent = AgentPlan(tier: "medium", edition: "personal", unit: "AFP", periods: [],
+                              expiresAt: date("2026-11-15T15:59:59Z"))
+        XCTAssertNotNil(agent.expiresAt)
+        XCTAssertNil(AgentPlan(tier: "", edition: "", unit: "AFP", periods: []).expiresAt)
+        let coding = CodingPlan(status: "Running", periods: [],
+                                expiresAt: date("2026-11-15T15:59:59Z"))
+        XCTAssertNotNil(coding.expiresAt)
+        XCTAssertNil(CodingPlan(status: "", periods: []).expiresAt)
+    }
 }

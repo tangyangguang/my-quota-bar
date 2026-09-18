@@ -215,6 +215,20 @@ struct ServiceCardView: View {
         }
     }
 
+    /// 套餐卡片的订阅到期时刻（仅 Agent Plan / Coding Plan 有）。
+    private var planExpiryDate: Date? {
+        switch service.content {
+        case .agentPlan(let p): return p.expiresAt
+        case .codingPlan(let p): return p.expiresAt
+        case .speech: return nil
+        }
+    }
+
+    private var expiryIsPast: Bool {
+        guard let d = planExpiryDate else { return false }
+        return PlanExpiry.state(expiry: d) == .expired
+    }
+
     /// 服务标题行：语音服务会在右端显示「剩 X%」（保持原样）。
     /// Agent Plan 标题行最左有折叠 chevron（hover 显示 / 折叠常显），整行可点折叠。
     @ViewBuilder
@@ -229,6 +243,15 @@ struct ServiceCardView: View {
                 badge(pack.type)
             }
             Spacer()
+            // 套餐订阅到期：跟在标题行右端（与卡片内进度条的重置时间无关，不会混淆）。
+            // 拿不到到期时间就整段不显示（附加信息，缺了不影响额度展示）。
+            if let expiry = planExpiryDate {
+                Text(PlanExpiry.titleText(expiry: expiry))
+                    .font(.caption2)
+                    .foregroundStyle(expiryIsPast ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+                    .monospacedDigit()
+                    .help("套餐到期时间（与额度窗口重置时间无关；到期后套餐结束）")
+            }
             // 语音标题行右侧的大「剩 X%」：标准样式、展开态显示（原样）；折叠后由摘要行承担不重复；
             // 紧凑样式下移到进度条行内，标题行不重复。
             if case .speech(let pack) = service.content,
