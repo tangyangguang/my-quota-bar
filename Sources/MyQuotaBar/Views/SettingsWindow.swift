@@ -128,26 +128,33 @@ struct AccountsTab: View {
 
                 Spacer()
                 if model.accountConfigs.count > 1 {
-                    Menu {
-                        if let selected {
-                            let group = model.accountConfigs.filter { $0.platform == selected.platform }
-                            let index = group.firstIndex(where: { $0.id == selected.id }) ?? 0
-                            Button("上移") { moveSelectedAccount(offset: -1) }
-                                .disabled(index == 0)
-                            Button("下移") { moveSelectedAccount(offset: 1) }
-                                .disabled(index == group.count - 1)
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down").frame(width: 24, height: 22)
+                    Button { moveSelectedAccount(offset: -1) } label: {
+                        Image(systemName: "chevron.up").frame(width: 24, height: 22)
                     }
-                    .menuStyle(.borderlessButton)
-                    .help("调整账号显示顺序")
+                    .buttonStyle(.borderless)
+                    .disabled(!canMoveSelected(offset: -1))
+                    .help("上移选中账号")
+
+                    Button { moveSelectedAccount(offset: 1) } label: {
+                        Image(systemName: "chevron.down").frame(width: 24, height: 22)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!canMoveSelected(offset: 1))
+                    .help("下移选中账号")
                 }
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
         }
         .frame(width: 190)
         .background(PanelColor.swiftUI)
+    }
+
+    /// 选中账号能否在其所属平台分组内移动（上移需不在首位，下移需不在末位）。
+    private func canMoveSelected(offset: Int) -> Bool {
+        guard let selected else { return false }
+        let group = model.accountConfigs.filter { $0.platform == selected.platform }
+        guard let index = group.firstIndex(where: { $0.id == selected.id }) else { return false }
+        return group.indices.contains(index + offset)
     }
 
     private func moveSelectedAccount(offset: Int) {
