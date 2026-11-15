@@ -6,9 +6,9 @@ struct AccountSectionView: View {
     let account: Account
     @Bindable var model: AppModel
     @State private var hovered = false
-    @State private var showReauth = false
 
     private var isCollapsed: Bool { model.collapsedAccounts.contains(account.id) }
+    private var reauthInProgress: Bool { model.isWebReauthInProgress(account.id) }
     /// chevron：折叠时常显（保证能发现可展开）；展开时仅 hover 显示。
     private var chevronVisible: Bool { isCollapsed || hovered }
     private var hasError: Bool { account.services.contains { $0.status == .error } }
@@ -17,6 +17,15 @@ struct AccountSectionView: View {
         VStack(alignment: .leading, spacing: 8) {
             header
                 .padding(.horizontal, 16)
+
+            // 一键重授失败原因（状态在 AppModel，面板关闭重开仍可见；展开/折叠都显示）。
+            if let message = model.webReauthError(account.id) {
+                Label(message, systemImage: "xmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+            }
 
             if isCollapsed {
                 collapsedCard
@@ -58,24 +67,31 @@ struct AccountSectionView: View {
                     .help("该账号有服务刷新失败，展开查看详情")
             }
             Spacer()
-            if account.webReauthNeeded {
+            if account.webReauthNeeded || reauthInProgress {
                 Button {
-                    showReauth = true
+                    model.startWebReauth(id: account.id)
                 } label: {
-                    Label("重新授权", systemImage: "arrow.clockwise")
-                        .font(.system(size: 10, weight: .medium))
+                    HStack(spacing: 3) {
+                        if reauthInProgress {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(reauthInProgress ? "授权中…" : "重新授权")
+                    }
+                    .font(.system(size: 10, weight: .medium))
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
                 .foregroundStyle(.orange)
-                .help("网页登录已过期，点击重新授权")
+                .disabled(reauthInProgress)
+                .help(reauthInProgress
+                      ? "浏览器应已打开火山登录页，授权完成后自动恢复"
+                      : "点击直接在浏览器重新授权")
             }
         }
         .contentShape(Rectangle())
         .onTapGesture { model.toggleAccountCollapsed(account.id) }
-        .sheet(isPresented: $showReauth) {
-            WebReauthorizeSheet(model: model, accountID: account.id)
-        }
         .onHover { hovered = $0 }
         .help(isCollapsed ? "点击展开账号" : "点击折叠账号")
         // chevron 浮在左侧边距里，不占排版空间：账号名始终在最左。

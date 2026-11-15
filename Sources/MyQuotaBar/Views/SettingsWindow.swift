@@ -577,8 +577,7 @@ struct AccountDetailView: View {
     @State private var agentTestState = TestState.idle
     @State private var codingTestState = TestState.idle
     @State private var showCredSheet = false
-    @State private var showWebReauthSheet = false
-    // 更换密钥/重授成功后 +1，用于强制重建服务行、清掉旧的测试结果。
+    // 更换密钥后 +1，用于强制重建服务行、清掉旧的测试结果。
     @State private var serviceEpoch = 0
 
     var body: some View {
@@ -586,6 +585,12 @@ struct AccountDetailView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if account.isWebLogin && webTokenStale {
                     webReauthBanner
+                }
+                // 重授失败提示不放在仅 stale 时出现的 banner 里：主动续期失败也要在发起处可见。
+                if account.isWebLogin, let message = model.webReauthError(account.id) {
+                    Label(message, systemImage: "xmark.circle.fill")
+                        .font(.caption2).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 accountGroup
                 if account.platform.isSupported {
@@ -608,12 +613,11 @@ struct AccountDetailView: View {
                 serviceEpoch += 1
             }
         }
-        .sheet(isPresented: $showWebReauthSheet) {
-            WebReauthorizeSheet(model: model, accountID: account.id) {
-                agentTestState = .idle
-                codingTestState = .idle
-                serviceEpoch += 1
-            }
+        .onChange(of: model.webReauthSucceededTick[account.id] ?? 0) { _, _ in
+            // 一键重新授权成功：凭证已换，清掉旧测试结果并重建服务行。
+            agentTestState = .idle
+            codingTestState = .idle
+            serviceEpoch += 1
         }
         .onAppear(perform: load)
         .onDisappear(perform: syncSpeechApps)
@@ -629,7 +633,7 @@ struct AccountDetailView: View {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             Text("网页登录已过期，需重新授权后才能刷新额度。").font(.caption2).foregroundStyle(.orange)
             Spacer()
-            Button("重新授权") { showWebReauthSheet = true }.controlSize(.small)
+            ReauthorizeButton(model: model, accountID: account.id)
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
@@ -672,13 +676,8 @@ struct AccountDetailView: View {
                         TextField("显示在面板上，可改成好认的名字", text: aliasBinding)
                             .textFieldStyle(.roundedBorder)
                         if account.isWebLogin {
-                            Button {
-                                showWebReauthSheet = true
-                            } label: {
-                                Label("重新授权…", systemImage: "globe")
-                            }
-                            .controlSize(.small)
-                            .help("网页登录每 48 小时需重新授权一次")
+                            ReauthorizeButton(model: model, accountID: account.id)
+                                .help("网页登录每 48 小时需重新授权一次")
                         } else {
                             Button {
                                 showCredSheet = true
@@ -1276,47 +1275,30 @@ struct WebAuthorizeControl: View {
     }
 }
 
-/// 对已有网页登录账号重新授权（refresh token 48h 过期后用）。
-struct WebReauthorizeSheet: View {
+/// 一键重新授权按钮：点击立即起 OAuth 并打开系统浏览器，无需中间确认弹窗。
+/// 进行中转圈禁用防重入；失败原因由调用方在旁边展示（状态存 AppModel，面板关闭重开仍在）。
+struct ReauthorizeButton: View {
     @Bindable var model: AppModel
     let accountID: String
-    var onDone: () -> Void = {}
-    @Environment(\.dismiss) private var dismiss
 
-    @State private var failure: String?
+    private var inProgress: Bool { model.isWebReauthInProgress(accountID) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text("重新网页授权").font(.headline).padding(.top, 16)
-
-            VStack(alignment: .leading, spacing: 14) {
-                Text("将在浏览器打开火山官方登录页，请登录原来的同一个账号完成授权。授权后有效期 48 小时。")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                WebAuthorizeControl { result in
-                    do {
-                        try model.reauthorizeWeb(id: accountID, result: result)
-                        onDone()
-                        dismiss()
-                    } catch {
-                        failure = error.localizedDescription
-                    }
+        Button {
+            model.startWebReauth(id: accountID)
+        } label: {
+            HStack(spacing: 5) {
+                if inProgress {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "globe")
                 }
-                if let failure {
-                    Label(failure, systemImage: "xmark.circle.fill")
-                        .font(.caption2).foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(inProgress ? "等待浏览器授权…" : "重新授权…")
+                    .lineLimit(1)
             }
-            .padding(16)
-
-            Divider()
-            HStack {
-                Spacer()
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            .padding(12)
         }
-        .frame(width: 440, height: 240)
+        .controlSize(.small)
+        .disabled(inProgress)
+        .help("点击后直接在浏览器打开火山官方登录页，登录同一个账号即可")
     }
 }

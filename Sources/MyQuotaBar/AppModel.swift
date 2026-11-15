@@ -64,6 +64,51 @@ final class AppModel {
     /// 网页登录凭证已过期 / 被拒、需重新授权的账号 ID（面板与设置据此提示）。
     private(set) var webReauthNeeded: Set<String> = []
 
+    /// 一键重新授权的进行/失败状态（按账号 UUID）。
+    /// 编排放在 AppModel 而非视图：菜单栏面板失焦即销毁，OAuth 回调可能在面板关闭后才回来。
+    struct WebReauthState: Equatable {
+        var inProgress: Bool = false
+        var errorMessage: String?
+    }
+    private(set) var webReauthState: [String: WebReauthState] = [:]
+    /// 重新授权成功的账号 ID 计数（每次成功 +1），设置页观察它重置测试态。
+    private(set) var webReauthSucceededTick: [String: Int] = [:]
+
+    /// 该账号重新授权是否进行中（按钮禁用/转圈用）。
+    func isWebReauthInProgress(_ id: String) -> Bool {
+        webReauthState[id]?.inProgress == true
+    }
+
+    /// 该账号最近一次重新授权的失败原因（成功后清除）。
+    func webReauthError(_ id: String) -> String? {
+        webReauthState[id]?.errorMessage
+    }
+
+    /// 一键重新授权：立即起本地回调并打开系统浏览器，无需中间确认弹窗。
+    /// 面板/设置两处入口共用；进行中防重入；失败原因保留在状态里，面板重开仍可见。
+    func startWebReauth(id: String) {
+        guard accountConfigs.contains(where: { $0.id == id }) else { return }
+        guard !isWebReauthInProgress(id) else { return }
+        webReauthState[id] = WebReauthState(inProgress: true, errorMessage: nil)
+        Task { [weak self] in
+            await self?.runWebReauth(id: id)
+        }
+    }
+
+    private func runWebReauth(id: String) async {
+        do {
+            let result = try await VolcWebAuth.runLogin()
+            try reauthorizeWeb(id: id, result: result)
+            webReauthState[id] = WebReauthState(inProgress: false, errorMessage: nil)
+            webReauthSucceededTick[id, default: 0] += 1
+        } catch {
+            // runLogin 没有可取消机制：超时/取消都经 WebCallbackReceiver.CallbackError 走这里，
+            // 文案由其 localizedDescription 给出（如「授权已取消」「授权超时」）。
+            webReauthState[id] = WebReauthState(inProgress: false,
+                                                errorMessage: error.localizedDescription)
+        }
+    }
+
     /// 刷新源（按服务类型分类，用于独立配置刷新间隔）。
     enum RefreshSource: String, CaseIterable, Sendable {
         case agentPlan = "agent-plan"
@@ -234,6 +279,7 @@ final class AppModel {
 
     /// 对已有网页账号重新授权：refresh token 覆盖为新值，账号 UUID/别名/开关全部不变。
     /// 必须授权给同一个火山账号，绑错则拒绝且不破坏原配置。
+    /// 由 `startWebReauth` 的一键流程调用；保留 throws 以便账号不一致时把原因回传 UI。
     func reauthorizeWeb(id: String, result: WebLoginResult) throws {
         guard let idx = accountConfigs.firstIndex(where: { $0.id == id }) else { return }
         if let existing = accountConfigs[idx].accountFullID, existing != result.accountID {
@@ -365,6 +411,9 @@ final class AppModel {
         accounts.removeAll { $0.id == id }
         accountFullID_[id] = nil
         webReauthNeeded.remove(id)
+        // 清掉重授状态，避免在途授权结束后给已删账号留下孤儿条目（在途 Task 会因找不到账号静默返回）。
+        webReauthState.removeValue(forKey: id)
+        webReauthSucceededTick.removeValue(forKey: id)
         collapsedAccounts.remove(id)
         collapsedServices = collapsedServices.filter { !$0.hasPrefix("\(id):") }
         persistenceError = nil
